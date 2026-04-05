@@ -1,0 +1,203 @@
+<template>
+  <div class="page">
+    <el-row :gutter="16">
+      <!-- 章节列表 -->
+      <el-col :span="7">
+        <el-card class="chapter-list">
+          <template #header>
+            <el-select v-model="topicKey" placeholder="选择主题" size="small"
+              filterable style="width:100%" :loading="domainsLoading"
+              @change="loadTutorial">
+              <el-option v-for="d in domains" :key="d.domain_tag"
+                :label="d.domain_tag" :value="d.domain_tag" />
+            </el-select>
+          </template>
+
+          <el-skeleton :rows="6" animated v-if="loading" />
+          <div v-else-if="tutorial">
+            <!-- 进度条 -->
+            <div style="margin-bottom:12px">
+              <p style="font-size:12px;color:#909399;margin-bottom:4px">
+                学习进度 {{ completedCount }}/{{ tutorial.chapter_tree?.length || 0 }}
+              </p>
+              <el-progress
+                :percentage="progressPercent"
+                :stroke-width="6"
+                :status="progressPercent === 100 ? 'success' : ''" />
+            </div>
+
+            <div v-for="chapter in tutorial.chapter_tree" :key="chapter.chapter_id"
+              class="chapter-item"
+              :class="{ active: currentChapter?.chapter_id === chapter.chapter_id,
+                        done: progress[chapter.chapter_id]?.completed }"
+              @click="selectChapter(chapter)">
+              <span class="chapter-icon">
+                {{ progress[chapter.chapter_id]?.completed ? '✅' : chapter.order_no }}
+              </span>
+              <span class="chapter-title">{{ chapter.title }}</span>
+            </div>
+          </div>
+          <el-empty v-else description="请选择主题" />
+        </el-card>
+      </el-col>
+
+      <!-- 章节内容 -->
+      <el-col :span="17">
+        <el-card>
+          <div v-if="currentChapter">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+              <h2 style="margin:0">{{ currentChapter.title }}</h2>
+              <el-button
+                :type="progress[currentChapter.chapter_id]?.completed ? 'success' : 'primary'"
+                @click="toggleComplete(currentChapter)">
+                {{ progress[currentChapter.chapter_id]?.completed ? '✅ 已完成' : '标记完成' }}
+              </el-button>
+            </div>
+
+            <el-alert v-if="tutorial?.status === 'skeleton_ready'" type="warning"
+              title="内容正在生成中，请稍后刷新" show-icon :closable="false"
+              style="margin-bottom:16px" />
+
+            <div class="content" v-html="renderedContent" />
+
+            <div style="margin-top:24px;padding-top:16px;border-top:1px solid #eee;
+                        display:flex;justify-content:space-between">
+              <el-button @click="prevChapter" :disabled="!hasPrev">← 上一章</el-button>
+              <el-button type="primary" @click="goChat">向 AI 提问本章内容</el-button>
+              <el-button @click="nextChapter" :disabled="!hasNext">下一章 →</el-button>
+            </div>
+          </div>
+          <el-empty v-else description="从左侧选择章节开始学习" />
+        </el-card>
+      </el-col>
+    </el-row>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, onMounted, watch } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
+import { ElMessage } from 'element-plus'
+import { marked } from 'marked'
+import { tutorialApi, knowledgeApi, learnerApi } from '@/api'
+
+const router         = useRouter()
+const route          = useRoute()
+const topicKey       = ref((route.query.topic as string) || '')
+const loading        = ref(false)
+const domainsLoading = ref(false)
+const tutorial       = ref<any>(null)
+const currentChapter = ref<any>(null)
+const domains        = ref<any[]>([])
+const progress       = ref<Record<string, any>>({})
+
+const renderedContent = computed(() => {
+  const text = currentChapter.value?.content_text || '（内容生成中，请稍后刷新页面）'
+  return marked(text)
+})
+
+const completedCount = computed(() =>
+  Object.values(progress.value).filter((p: any) => p.completed).length
+)
+const progressPercent = computed(() => {
+  const total = tutorial.value?.chapter_tree?.length || 0
+  return total ? Math.round(completedCount.value / total * 100) : 0
+})
+
+const currentIndex = computed(() => {
+  if (!tutorial.value || !currentChapter.value) return -1
+  return tutorial.value.chapter_tree.findIndex(
+    (c: any) => c.chapter_id === currentChapter.value.chapter_id
+  )
+})
+const hasPrev = computed(() => currentIndex.value > 0)
+const hasNext = computed(() =>
+  currentIndex.value < (tutorial.value?.chapter_tree?.length || 0) - 1
+)
+
+async function loadDomains() {
+  domainsLoading.value = true
+  try {
+    const res: any = await knowledgeApi.getDomains()
+    domains.value = res.data?.domains || []
+  } finally { domainsLoading.value = false }
+}
+
+async function loadTutorial() {
+  if (!topicKey.value) return
+  loading.value = true
+  try {
+    const res: any = await tutorialApi.getByTopic(topicKey.value)
+    tutorial.value = res.data
+    if (res.data?.chapter_tree?.length) {
+      await selectChapter(res.data.chapter_tree[0])
+      await loadProgress()
+    }
+  } finally { loading.value = false }
+}
+
+async function loadProgress() {
+  if (!tutorial.value?.tutorial_id) return
+  try {
+    const res: any = await learnerApi.getChapterProgress(tutorial.value.tutorial_id)
+    progress.value = res.data?.progress || {}
+  } catch {}
+}
+
+async function selectChapter(chapter: any) {
+  currentChapter.value = chapter
+}
+
+async function toggleComplete(chapter: any) {
+  if (!tutorial.value?.tutorial_id) return
+  const wasCompleted = progress.value[chapter.chapter_id]?.completed
+  await learnerApi.markChapter({
+    tutorial_id: tutorial.value.tutorial_id,
+    chapter_id:  chapter.chapter_id,
+    completed:   !wasCompleted,
+  })
+  progress.value[chapter.chapter_id] = { completed: !wasCompleted }
+  ElMessage.success(!wasCompleted ? '已标记完成 ✅' : '已取消完成标记')
+}
+
+function prevChapter() {
+  if (hasPrev.value)
+    currentChapter.value = tutorial.value.chapter_tree[currentIndex.value - 1]
+}
+function nextChapter() {
+  if (hasNext.value)
+    currentChapter.value = tutorial.value.chapter_tree[currentIndex.value + 1]
+}
+function goChat() {
+  router.push({ path: '/chat', query: { topic: topicKey.value } })
+}
+
+onMounted(() => {
+  loadDomains()
+  if (topicKey.value) loadTutorial()
+})
+</script>
+
+<style scoped>
+.page { padding: 8px; }
+.chapter-list { height: calc(100vh - 120px); overflow-y: auto; }
+.chapter-item {
+  padding: 10px 12px; cursor: pointer; border-radius: 6px;
+  margin-bottom: 4px; display: flex; align-items: center; gap: 8px;
+  transition: background .15s;
+}
+.chapter-item:hover  { background: #f0f7ff; }
+.chapter-item.active { background: #ecf5ff; color: #409eff; }
+.chapter-item.done   { opacity: 0.7; }
+.chapter-icon { width: 24px; height: 24px; border-radius: 50%; background: #409eff;
+  color: #fff; font-size: 12px; display: flex; align-items: center;
+  justify-content: center; flex-shrink: 0; }
+.chapter-item.done .chapter-icon { background: #67c23a; }
+.chapter-title { flex: 1; font-size: 14px; }
+.content { line-height: 1.8; color: #303133; }
+.content :deep(h1),.content :deep(h2),.content :deep(h3) { margin: 16px 0 8px; }
+.content :deep(p)    { margin-bottom: 12px; }
+.content :deep(code) { background: #f5f5f5; padding: 2px 6px; border-radius: 3px; }
+.content :deep(pre)  { background: #282c34; color: #abb2bf; padding: 16px;
+  border-radius: 6px; overflow-x: auto; margin: 12px 0; }
+</style>

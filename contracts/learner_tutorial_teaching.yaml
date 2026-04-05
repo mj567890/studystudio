@@ -1,0 +1,416 @@
+openapi: 3.0.3
+info:
+  title: 自适应学习平台 API
+  version: 1.0.0
+  description: Block C（学习者画像）+ Block D（教程）+ Block E（教学对话）接口契约
+
+servers:
+  - url: https://api.your-domain.com
+    description: 生产环境
+  - url: http://localhost:8000
+    description: 开发环境
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    PathStep:
+      type: object
+      description: 补洞路径中的单步
+      properties:
+        step_no:          { type: integer }
+        type:             { type: string, enum: [chapter, entity] }
+        ref_id:           { type: string }
+        title:            { type: string }
+        dependency_depth: { type: integer, description: 拓扑深度，0=根节点，越小越基础 }
+
+    DiagnosisUpdate:
+      type: object
+      properties:
+        suspected_gap_types:
+          type: array
+          items: { type: string, enum: [definition, mechanism, flow, distinction, application, causal] }
+        updated_entities: { type: array, items: { type: string } }
+        confidence:
+          type: number
+          format: float
+          description: "置信度 [0,1]，计算公式：0.6×llm_certainty + 0.4×norm_rrf_score"
+        error_pattern:
+          type: string
+          nullable: true
+          description: 一句话描述用户的错误推理模式
+
+paths:
+  # ── Block C：学习者画像 ────────────────────────────────────
+  /api/learners/me/profile:
+    get:
+      summary: 获取个人学习画像
+      tags: [Block C - 学习者画像]
+      security: [{ BearerAuth: [] }]
+      responses:
+        '200':
+          description: 个人学习画像
+          content:
+            application/json:
+              example:
+                code: 200
+                msg: success
+                data:
+                  user_id: "550e8400-e29b-41d4-a716-446655440000"
+                  mastery_summary:
+                    last_gap_types: [mechanism, flow]
+                    last_confidence: 0.74
+                    last_error_pattern: 知道include语法但未意识到路径可由外部输入控制
+                    updated_at: "2026-04-03T11:00:00Z"
+                  version: 5
+                  updated_at: "2026-04-03T11:00:00Z"
+
+  /api/learners/me/placement-quiz:
+    get:
+      summary: 获取冷启动定位自检题目
+      description: |
+        首次进入主题时调用。
+        - 题库已就绪：返回预生成的 8-12 道题（每领域基础+进阶各1题）
+        - 题库未就绪：返回简化兜底题（is_fallback=true），同时后台异步生成完整题库
+      tags: [Block C - 学习者画像]
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: topic_key
+          in: query
+          required: true
+          schema: { type: string }
+          example: php-file-include
+      responses:
+        '200':
+          description: 定位自检题目
+          content:
+            application/json:
+              example:
+                code: 200
+                msg: success
+                data:
+                  quiz_type: placement
+                  topic_key: php-file-include
+                  is_fallback: false
+                  questions:
+                    - question_id: "q_001"
+                      domain: php-security-vulnerability
+                      difficulty: basic
+                      stem: 以下哪种情况下 include 语句会产生安全风险？
+                      options:
+                        - A. 包含绝对路径的固定文件
+                        - B. 包含由用户输入决定的路径
+                        - C. 包含同目录下的配置文件
+                        - D. 包含 PHP 内置函数库
+
+  /api/learners/me/placement-result:
+    post:
+      summary: 提交冷启动答题结果，初始化掌握度
+      tags: [Block C - 学习者画像]
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [topic_key, answers]
+              properties:
+                topic_key: { type: string }
+                answers:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      question_id:     { type: string }
+                      selected_option: { type: string }
+                      domain:          { type: string }
+                      difficulty:      { type: string }
+                      is_correct:      { type: boolean }
+            example:
+              topic_key: php-file-include
+              answers:
+                - question_id: q_001
+                  selected_option: "B"
+                  domain: php-security-vulnerability
+                  difficulty: basic
+                  is_correct: true
+                - question_id: q_002
+                  selected_option: "B"
+                  domain: php-security-vulnerability
+                  difficulty: advanced
+                  is_correct: true
+      responses:
+        '200':
+          description: 掌握度初始化成功
+          content:
+            application/json:
+              example:
+                code: 200
+                msg: success
+                data:
+                  mastery_initialized: true
+                  entity_count: 42
+                  domain_scores:
+                    php-security-vulnerability: 0.75
+                  profile_updated_at: "2026-04-03T11:00:00Z"
+
+  /api/learners/me/gaps:
+    get:
+      summary: 获取知识漏洞报告
+      tags: [Block C - 学习者画像]
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: topic_key
+          in: query
+          required: true
+          schema: { type: string }
+          example: php-file-include
+      responses:
+        '200':
+          description: 知识漏洞报告
+          content:
+            application/json:
+              example:
+                code: 200
+                msg: success
+                data:
+                  user_id: "550e8400-e29b-41d4-a716-446655440000"
+                  topic_key: php-file-include
+                  weak_points:
+                    - entity_id: e_flow_1
+                      canonical_name: 输入到包含的漏洞链
+                      mastery_score: 0.12
+                      gap_types: [flow]
+                      priority: 1
+                  uncertain_points:
+                    - entity_id: e_rfi
+                      canonical_name: 远程文件包含（RFI）
+                      mastery_score: 0.55
+                      gap_types: [distinction]
+                      priority: 3
+                  mastered_points:
+                    - entity_id: e_include
+                      canonical_name: PHP include 语句
+                      mastery_score: 0.91
+                      mastery_level: high
+                  generated_at: "2026-04-03T11:05:00Z"
+
+  /api/learners/me/repair-path:
+    get:
+      summary: 获取补洞学习路径
+      description: |
+        基于知识依赖图和当前掌握度，生成个性化学习顺序。
+        - 使用 Kahn 算法拓扑排序，保证前置知识优先
+        - 掌握度 >= 0.7 的节点自动剪枝（不出现在路径中）
+        - 超过 20 步时按 dependency_depth 截断，is_truncated=true
+      tags: [Block C - 学习者画像]
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: topic_key
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 补洞学习路径
+          content:
+            application/json:
+              example:
+                code: 200
+                msg: success
+                data:
+                  user_id: "550e8400-e29b-41d4-a716-446655440000"
+                  topic_key: php-file-include
+                  required_entity_ids: [e_path_control, e_flow_1, e_lfi]
+                  path_steps:
+                    - step_no: 1
+                      type: entity
+                      ref_id: e_path_control
+                      title: 路径可控的含义
+                      dependency_depth: 0
+                    - step_no: 2
+                      type: entity
+                      ref_id: e_flow_1
+                      title: 输入到包含的漏洞链
+                      dependency_depth: 1
+                  is_truncated: false
+                  total_steps: 2
+
+  /api/learners/me/precheck:
+    post:
+      summary: 章节前自检（进入章节前测验）
+      tags: [Block C - 学习者画像]
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            example:
+              chapter_id: ch_001
+              topic_key: php-file-include
+      responses:
+        '200':
+          description: 前自检题目
+          content:
+            application/json:
+              example:
+                code: 200
+                msg: success
+                data:
+                  quiz_id: quiz_001
+                  quiz_type: precheck
+                  questions: []
+
+  /api/learners/me/postcheck:
+    post:
+      summary: 章节后确认（完成章节后测验）
+      tags: [Block C - 学习者画像]
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            example:
+              chapter_id: ch_001
+              answers: []
+      responses:
+        '200':
+          description: 测验结果和掌握度更新
+          content:
+            application/json:
+              example:
+                code: 200
+                msg: success
+                data:
+                  score: 0.8
+                  mastery_updated: true
+
+  # ── Block D：教程 ──────────────────────────────────────────
+  /api/tutorials/topic/{topic_key}:
+    get:
+      summary: 获取或触发生成主题教程
+      description: |
+        - 教程骨架已生成：直接返回
+        - 骨架生成中：返回 202 Accepted，客户端轮询或等待 WebSocket 通知
+        - 触发新生成：骨架是主题级通用资产，并发请求由 Redis 分布式锁保护（仅一个触发生成）
+      tags: [Block D - 教程]
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: topic_key
+          in: path
+          required: true
+          schema: { type: string }
+          example: php-file-include
+      responses:
+        '200':
+          description: 教程骨架（含个性化 annotations）
+          content:
+            application/json:
+              example:
+                code: 200
+                msg: success
+                data:
+                  tutorial_id: "t_001"
+                  topic_key: php-file-include
+                  status: skeleton_ready
+                  chapter_tree:
+                    - chapter_id: ch_001
+                      title: 路径可控的含义
+                      order_no: 1
+                      target_entity_ids: [e_path_control]
+                      prerequisite_entity_ids: []
+                      estimated_minutes: 15
+        '202':
+          description: 教程生成中
+          content:
+            application/json:
+              example:
+                code: 202
+                msg: Tutorial generation in progress
+                data:
+                  tutorial_id: "t_002"
+                  status: generating
+
+  # ── Block E：交互教学对话 ──────────────────────────────────
+  /api/teaching/conversations:
+    post:
+      summary: 创建对话会话
+      tags: [Block E - 教学对话]
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: topic_key
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '201':
+          description: 对话会话已创建
+          content:
+            application/json:
+              example:
+                code: 201
+                msg: success
+                data:
+                  conversation_id: cv_001
+
+  /api/teaching/chat:
+    post:
+      summary: 教学对话
+      description: |
+        发送消息并获取 AI 教学回复。
+        - 自动识别问题复杂度并路由到对应模型（simple→gpt-4o-mini，complex→gpt-4o）
+        - LLM 返回结构化输出（response + certainty_level + gap_types + error_pattern）
+        - 诊断写入异步执行（BackgroundTasks），不阻塞响应
+        - 置信度计算：0.6×llm_certainty + 0.4×normalize_rrf_score
+      tags: [Block E - 教学对话]
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [conversation_id, message]
+              properties:
+                conversation_id: { type: string }
+                message:         { type: string }
+                context:
+                  type: object
+                  properties:
+                    topic_key:       { type: string }
+                    current_chapter: { type: string }
+            example:
+              conversation_id: cv_001
+              message: 为什么 include 会导致漏洞？
+              context:
+                topic_key: php-file-include
+                current_chapter: ch_002
+      responses:
+        '200':
+          description: AI 教学回复
+          content:
+            application/json:
+              example:
+                code: 200
+                msg: success
+                data:
+                  conversation_id: cv_001
+                  turn_id: turn_01
+                  assistant_message: |
+                    include 本身只是包含文件的语句，真正危险的前提是被包含的路径可被攻击者控制。
+                    当 `include $_GET['page']` 这样的代码存在时，攻击者可以传入任意路径...
+                  cited_entity_ids: [e_include, e_path_control]
+                  suggested_next_steps:
+                    - type: entity
+                      ref_id: e_path_control
+                      title: 路径可控的含义
+                  diagnosis_update:
+                    suspected_gap_types: [mechanism, flow]
+                    updated_entities: [e_path_control]
+                    confidence: 0.74
+                    error_pattern: 知道 include 的语法，但未意识到路径可由外部输入控制

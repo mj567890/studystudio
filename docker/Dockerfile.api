@@ -1,0 +1,32 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# 安装系统依赖
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    libpq-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# 配置 pip：使用国内镜像 + 增大超时 + 自动重试
+RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple \
+    && pip config set global.trusted-host pypi.tuna.tsinghua.edu.cn \
+    && pip config set global.timeout 120 \
+    && pip config set global.retries 5
+
+# 复制依赖文件（用 requirements.txt，比 Poetry 更稳定）
+COPY requirements.txt ./
+
+# 安装依赖
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 复制源码
+COPY . .
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+EXPOSE 8000
+CMD ["uvicorn", "apps.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
