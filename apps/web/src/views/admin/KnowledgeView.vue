@@ -2,8 +2,23 @@
   <div class="page">
     <el-card v-loading="loading">
       <template #header>
-        <span>知识库管理</span>
-        <el-button size="small" style="float:right" @click="load">刷新</el-button>
+        <div class="toolbar">
+          <span>知识库管理</span>
+          <div class="toolbar-actions">
+            <el-input
+              v-model="newDomain"
+              size="small"
+              clearable
+              placeholder="输入新领域名，例如 web-security"
+              style="width: 240px"
+              @keyup.enter="createDomain"
+            />
+            <el-button size="small" type="primary" :loading="creating" @click="createDomain">
+              新建领域
+            </el-button>
+            <el-button size="small" @click="load">刷新</el-button>
+          </div>
+        </div>
       </template>
 
       <el-table :data="domains" size="small">
@@ -32,19 +47,42 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
+import { ElMessage } from 'element-plus'
 import { useRouter } from 'vue-router'
-import { knowledgeApi } from '@/api'
+import { adminApi, knowledgeApi } from '@/api'
 
-const router  = useRouter()
+const router = useRouter()
 const loading = ref(false)
+const creating = ref(false)
 const domains = ref<any[]>([])
+const newDomain = ref('')
 
 async function load() {
   loading.value = true
   try {
     const res: any = await knowledgeApi.getDomains()
     domains.value = res.data?.domains || []
-  } finally { loading.value = false }
+  } finally {
+    loading.value = false
+  }
+}
+
+async function createDomain() {
+  const name = newDomain.value.trim()
+  if (!name) {
+    ElMessage.warning('请输入领域名')
+    return
+  }
+
+  creating.value = true
+  try {
+    await adminApi.createKnowledgeSpace({ name, space_type: 'global' })
+    ElMessage.success('领域已创建')
+    newDomain.value = ''
+    await load()
+  } finally {
+    creating.value = false
+  }
 }
 
 function goLearn(domain: string) {
@@ -57,4 +95,22 @@ function goReview(domain: string) {
 
 onMounted(load)
 </script>
-<style scoped>.page { padding: 8px; }</style>
+
+<style scoped>
+.page {
+  padding: 8px;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+</style>

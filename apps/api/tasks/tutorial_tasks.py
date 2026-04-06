@@ -52,6 +52,7 @@ celery_app.conf.update(
         "apps.api.tasks.tutorial_tasks.generate_content":         {"queue": "tutorial"},
         "apps.api.tasks.tutorial_tasks.generate_annotations":     {"queue": "tutorial"},
         "apps.api.tasks.tutorial_tasks.prebuild_placement_bank":  {"queue": "low_priority"},
+        "apps.api.tasks.knowledge_tasks.run_ingest":              {"queue": "knowledge"},
         "apps.api.tasks.knowledge_tasks.run_extraction":          {"queue": "knowledge"},
     }
 )
@@ -139,53 +140,63 @@ async def _generate_annotations_async(
     tutorial_id: str, topic_key: str, user_id: str
 ) -> None:
     from apps.api.core.db import get_independent_db, engine
+    from apps.api.core.events import get_event_bus
 
     # FIX-3：丢弃 fork 继承的旧连接句柄
     engine.sync_engine.dispose(close=False)
 
-    async with get_independent_db() as session:
-        # 获取用户漏洞报告
-        from apps.api.modules.learner.learner_service import GapScanService
-        gap_svc = GapScanService(session)
-        gap_report = await gap_svc.scan(user_id, topic_key)
+    # FIX-4：Celery worker 中 GapScanService.scan() 会发布事件，需手动连接 EventBus
+    event_bus = get_event_bus()
+    if event_bus._connection is None or event_bus._connection.is_closed:
+        await event_bus.connect()
 
-        # 获取骨架章节树
-        result = await session.execute(
-            __import__("sqlalchemy").text(
-                "SELECT chapter_tree FROM tutorial_skeletons WHERE tutorial_id = :tid"
-            ),
-            {"tid": tutorial_id}
-        )
-        row = result.fetchone()
-        if not row:
-            return
+    try:
+        async with get_independent_db() as session:
+            # 获取用户漏洞报告
+            from apps.api.modules.learner.learner_service import GapScanService
+            gap_svc = GapScanService(session)
+            gap_report = await gap_svc.scan(user_id, topic_key)
 
-        weak_ids = {wp["entity_id"] for wp in gap_report.get("weak_points", [])}
+            # 获取骨架章节树
+            result = await session.execute(
+                __import__("sqlalchemy").text(
+                    "SELECT chapter_tree FROM tutorial_skeletons WHERE tutorial_id = :tid"
+                ),
+                {"tid": tutorial_id}
+            )
+            row = result.fetchone()
+            if not row:
+                return
 
-        # 为每个薄弱点章节创建 annotation
-        for chapter in (row.chapter_tree or []):
-            for eid in chapter.get("target_entity_ids", []):
-                if eid in weak_ids:
-                    await session.execute(
-                        __import__("sqlalchemy").text("""
-                            INSERT INTO tutorial_annotations
-                              (annotation_id, tutorial_id, user_id, chapter_id,
-                               gap_types, priority_boost, is_weak_point)
-                            VALUES
-                              (:aid, :tid, :uid, :chid, CAST(:gaps AS jsonb), 0.5, true)
-                            ON CONFLICT (tutorial_id, user_id, chapter_id)
-                            DO UPDATE SET priority_boost = 0.5, is_weak_point = true
-                        """),
-                        {
-                            "aid":  __import__("uuid").uuid4().__str__(),
-                            "tid":  tutorial_id,
-                            "uid":  user_id,
-                            "chid": chapter.get("chapter_id", ""),
-                            "gaps": __import__("json").dumps(["mechanism"]),
-                        }
-                    )
-        await session.commit()
-        logger.info("Annotations generated", tutorial_id=tutorial_id, user_id=user_id)
+            weak_ids = {wp["entity_id"] for wp in gap_report.get("weak_points", [])}
+
+            # 为每个薄弱点章节创建 annotation
+            for chapter in (row.chapter_tree or []):
+                for eid in chapter.get("target_entity_ids", []):
+                    if eid in weak_ids:
+                        await session.execute(
+                            __import__("sqlalchemy").text("""
+                                INSERT INTO tutorial_annotations
+                                  (annotation_id, tutorial_id, user_id, chapter_id,
+                                   gap_types, priority_boost, is_weak_point)
+                                VALUES
+                                  (:aid, :tid, :uid, :chid, CAST(:gaps AS jsonb), 0.5, true)
+                                ON CONFLICT (tutorial_id, user_id, chapter_id)
+                                DO UPDATE SET priority_boost = 0.5, is_weak_point = true
+                            """),
+                            {
+                                "aid":  __import__("uuid").uuid4().__str__(),
+                                "tid":  tutorial_id,
+                                "uid":  user_id,
+                                "chid": chapter.get("chapter_id", ""),
+                                "gaps": __import__("json").dumps(["definition"]),
+                            }
+                        )
+            await session.commit()
+            logger.info("Annotations generated", tutorial_id=tutorial_id, user_id=user_id)
+    finally:
+        if event_bus._connection is not None and not event_bus._connection.is_closed:
+            await event_bus.disconnect()
 
 
 # ─────────────────────────────────────────────────────────────────

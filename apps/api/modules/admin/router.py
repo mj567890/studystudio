@@ -34,28 +34,175 @@ async def get_domains(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ) -> dict:
-    """获取知识库中所有领域标签及知识点数量，供前端下拉选择使用。"""
+    """获取可见领域列表；优先展示 knowledge_spaces，同时兼容历史实体数据。"""
     result = await db.execute(
         text("""
-            SELECT domain_tag, space_type,
-                   COUNT(*) AS entity_count,
-                   SUM(CASE WHEN is_core THEN 1 ELSE 0 END) AS core_count
-            FROM knowledge_entities
-            WHERE review_status = 'approved'
-            GROUP BY domain_tag, space_type
-            ORDER BY entity_count DESC
-        """)
+            WITH entity_domains AS (
+                SELECT
+                    ke.domain_tag,
+                    ke.space_type,
+                    COUNT(*) AS entity_count,
+                    COALESCE(SUM(CASE WHEN ke.is_core THEN 1 ELSE 0 END), 0) AS core_count,
+                    MAX(ke.created_at) AS sort_time
+                FROM knowledge_entities ke
+                WHERE ke.review_status IN ('pending', 'approved')
+                  AND ke.domain_tag IS NOT NULL
+                  AND ke.domain_tag <> ''
+                  AND (
+                        ke.space_type = 'global'
+                     OR ke.space_type = 'course'
+                     OR ke.space_id::text IN (
+                            SELECT ks.space_id::text
+                            FROM knowledge_spaces ks
+                            WHERE ks.owner_id::text = :user_id
+                        )
+                  )
+                GROUP BY ke.domain_tag, ke.space_type
+            ),
+            space_domains AS (
+                SELECT
+                    ks.space_id::text AS space_id,
+                    ks.name AS domain_tag,
+                    ks.space_type,
+                    ks.created_at AS sort_time
+                FROM knowledge_spaces ks
+                WHERE ks.name IS NOT NULL
+                  AND ks.name <> ''
+                  AND (
+                        ks.space_type = 'global'
+                     OR ks.owner_id::text = :user_id
+                  )
+            ),
+            merged AS (
+                SELECT
+                    sd.space_id,
+                    COALESCE(sd.domain_tag, ed.domain_tag) AS domain_tag,
+                    COALESCE(sd.space_type, ed.space_type) AS space_type,
+                    COALESCE(ed.entity_count, 0) AS entity_count,
+                    COALESCE(ed.core_count, 0) AS core_count,
+                    COALESCE(ed.sort_time, sd.sort_time) AS sort_time
+                FROM space_domains sd
+                FULL OUTER JOIN entity_domains ed
+                  ON sd.domain_tag = ed.domain_tag
+                 AND sd.space_type = ed.space_type
+            )
+            SELECT space_id, domain_tag, space_type, entity_count, core_count
+            FROM merged
+            WHERE domain_tag IS NOT NULL
+            ORDER BY CASE WHEN space_type = 'global' THEN 0 ELSE 1 END,
+                     entity_count DESC,
+                     sort_time DESC NULLS LAST,
+                     domain_tag ASC
+        """),
+        {"user_id": current_user["user_id"]}
     )
     domains = [
         {
-            "domain_tag":   row.domain_tag,
-            "space_type":   row.space_type,
+            "space_id": row.space_id,
+            "domain_tag": row.domain_tag,
+            "space_type": row.space_type,
             "entity_count": row.entity_count,
-            "core_count":   row.core_count,
+            "core_count": row.core_count,
         }
         for row in result.fetchall()
     ]
     return {"code": 200, "msg": "success", "data": {"domains": domains}}
+
+
+class CreateKnowledgeSpaceRequest(BaseModel):
+    name: str
+    space_type: str = "global"
+    description: str | None = None
+
+
+@router.post("/admin/knowledge/spaces")
+async def create_knowledge_space(
+    req: CreateKnowledgeSpaceRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_role("admin", "knowledge_reviewer")),
+) -> dict:
+    """创建知识空间（领域）；已存在时直接返回原 space_id。"""
+    space_name = " ".join((req.name or "").split()).strip()
+    if not space_name:
+        raise HTTPException(400, detail={"code": "SPACE_001", "msg": "Domain name is required"})
+    if req.space_type not in ("global", "course", "personal"):
+        raise HTTPException(400, detail={"code": "SPACE_002", "msg": "Invalid space_type"})
+
+    if req.space_type == "global":
+        existing = await db.execute(
+            text("""
+                SELECT space_id::text
+                FROM knowledge_spaces
+                WHERE space_type = :space_type
+                  AND name = :name
+                ORDER BY created_at ASC
+                LIMIT 1
+            """),
+            {"space_type": req.space_type, "name": space_name},
+        )
+    else:
+        existing = await db.execute(
+            text("""
+                SELECT space_id::text
+                FROM knowledge_spaces
+                WHERE space_type = :space_type
+                  AND owner_id::text = :owner_id
+                  AND name = :name
+                ORDER BY created_at ASC
+                LIMIT 1
+            """),
+            {
+                "space_type": req.space_type,
+                "owner_id": current_user["user_id"],
+                "name": space_name,
+            },
+        )
+
+    row = existing.fetchone()
+    if row:
+        return {
+            "code": 200,
+            "msg": "success",
+            "data": {
+                "space_id": str(row.space_id),
+                "domain_tag": space_name,
+                "space_type": req.space_type,
+                "created": False,
+            },
+        }
+
+    space_id = str(uuid.uuid4())
+    await db.execute(
+        text("""
+            INSERT INTO knowledge_spaces (space_id, space_type, owner_id, name, description)
+            VALUES (:space_id, :space_type, :owner_id, :name, :description)
+        """),
+        {
+            "space_id": space_id,
+            "space_type": req.space_type,
+            "owner_id": current_user["user_id"],
+            "name": space_name,
+            "description": req.description.strip() if req.description else None,
+        },
+    )
+    await db.commit()
+    logger.info(
+        "Knowledge space created",
+        space_id=space_id,
+        space_type=req.space_type,
+        domain_tag=space_name,
+        operator=current_user["user_id"],
+    )
+    return {
+        "code": 201,
+        "msg": "success",
+        "data": {
+            "space_id": space_id,
+            "domain_tag": space_name,
+            "space_type": req.space_type,
+            "created": True,
+        },
+    }
 
 
 @router.get("/files/my-documents")

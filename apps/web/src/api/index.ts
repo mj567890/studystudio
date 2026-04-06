@@ -108,6 +108,8 @@ export const adminApi = {
   listPendingEntities: () => http.get('/admin/entities/pending'),
   reviewEntity: (data: { entity_id: string; action: string; reason?: string }) =>
     http.post('/admin/entities/review', data),
+  createKnowledgeSpace: (data: { name: string; space_type?: string; description?: string }) =>
+    http.post('/admin/knowledge/spaces', data),
 
   // 系统初始化与配置
   getInitStatus:    ()    => http.get('/admin/system/init-status'),

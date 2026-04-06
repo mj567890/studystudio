@@ -185,6 +185,7 @@ async def _run_extraction_async(
             return
 
         llm = get_llm_gateway()
+        domain_tag = await _resolve_domain_tag(session, space_id)
         all_entities: list[dict] = []
         all_relations: list[dict] = []
         entity_names_seen: set[str] = set()
@@ -267,7 +268,7 @@ async def _run_extraction_async(
                             "canonical_name": entity_name,
                             "etype":          entity.get("entity_type", "concept"),
                             "definition":     entity.get("short_definition", ""),
-                            "domain_tag":     "general",
+                            "domain_tag":     domain_tag,
                             "space_type":     space_type,
                             "space_id":       space_id,
                         }
@@ -310,13 +311,73 @@ async def _run_extraction_async(
 # 四步管线子函数
 # ════════════════════════════════════════════════════════════════
 
+async def _resolve_domain_tag(session, space_id: str | None) -> str:
+    """根据 knowledge_spaces 反推领域标签，未命中时回退到 general。"""
+    from sqlalchemy import text
+
+    if not space_id:
+        return "general"
+
+    result = await session.execute(
+        text(
+            """
+                SELECT name
+                FROM knowledge_spaces
+                WHERE space_id::text = :space_id
+                LIMIT 1
+            """
+        ),
+        {"space_id": space_id},
+    )
+    row = result.fetchone()
+    if row and row.name:
+        return row.name
+    return "general"
+
+
+def _normalize_entity_candidates(raw_entities: object) -> list[dict]:
+    """兼容 LLM 返回字符串数组或字典数组两种格式。"""
+    if not isinstance(raw_entities, list):
+        return []
+
+    normalized: list[dict] = []
+    seen_names: set[str] = set()
+    for item in raw_entities:
+        if isinstance(item, str):
+            entity_name = item.strip()
+            payload: dict = {"entity_name": entity_name}
+        elif isinstance(item, dict):
+            entity_name = str(item.get("entity_name") or item.get("name") or "").strip()
+            payload = {**item, "entity_name": entity_name}
+        else:
+            continue
+
+        if not entity_name or entity_name in seen_names:
+            continue
+        seen_names.add(entity_name)
+        normalized.append(payload)
+
+    return normalized
+
+
+def _fallback_classified_entities(raw_entities: list[dict]) -> list[dict]:
+    return [
+        {
+            "entity_name": e["entity_name"],
+            "entity_type": e.get("entity_type", "concept") or "concept",
+            "short_definition": e.get("short_definition", "") or "",
+        }
+        for e in _normalize_entity_candidates(raw_entities)
+        if e.get("entity_name")
+    ]
+
 async def _step_entity_recognition(llm, chunk_text: str) -> list[dict]:
     """步骤1：实体识别。失败返回空列表，不抛异常。"""
     try:
         prompt = ENTITY_RECOGNITION_PROMPT.format(text=chunk_text[:3000])
         resp   = await llm.generate(prompt, model_route="knowledge_extraction")
         data   = _safe_parse_json(resp)
-        return data.get("entities", [])
+        return _normalize_entity_candidates(data.get("entities", []))
     except Exception as e:
         logger.debug("Entity recognition failed", error=str(e))
         return []
@@ -326,11 +387,12 @@ async def _step_entity_classification(
     llm, chunk_text: str, raw_entities: list[dict]
 ) -> list[dict]:
     """步骤2：实体分类。失败时退回原始实体列表（entity_type 默认 concept）。"""
-    if not raw_entities:
+    normalized_entities = _normalize_entity_candidates(raw_entities)
+    if not normalized_entities:
         return []
     try:
         entity_names = json.dumps(
-            [e["entity_name"] for e in raw_entities if e.get("entity_name")],
+            [e["entity_name"] for e in normalized_entities if e.get("entity_name")],
             ensure_ascii=False
         )
         prompt = ENTITY_CLASSIFICATION_PROMPT.format(
@@ -339,16 +401,21 @@ async def _step_entity_classification(
         )
         resp = await llm.generate(prompt, model_route="knowledge_extraction")
         data = _safe_parse_json(resp)
-        classified = data.get("entities", [])
+        classified = _normalize_entity_candidates(data.get("entities", []))
         if classified:
-            return classified
+            return [
+                {
+                    "entity_name": e["entity_name"],
+                    "entity_type": e.get("entity_type", "concept") or "concept",
+                    "short_definition": e.get("short_definition", "") or "",
+                }
+                for e in classified
+            ]
         # LLM 返回空时，用原始实体列表兜底
-        return [{"entity_name": e["entity_name"], "entity_type": "concept", "short_definition": ""}
-                for e in raw_entities if e.get("entity_name")]
+        return _fallback_classified_entities(normalized_entities)
     except Exception as e:
         logger.debug("Entity classification failed", error=str(e))
-        return [{"entity_name": e["entity_name"], "entity_type": "concept", "short_definition": ""}
-                for e in raw_entities if e.get("entity_name")]
+        return _fallback_classified_entities(normalized_entities)
 
 
 async def _step_relation_extraction(
