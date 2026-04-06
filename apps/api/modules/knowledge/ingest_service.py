@@ -62,7 +62,9 @@ class DocumentIngestService:
                 "owner_id":   owner_id,
             }
         )
-        await self.db.commit()
+        # FIX-H：用 flush 代替 commit，避免关闭事务后 ingest() 无法继续操作
+        # flush 会将 INSERT 发送到数据库（同事务内可见），但不关闭事务
+        await self.db.flush()
         await self.ingest(document_id, minio_key, space_type, space_id)
         return document_id
 
@@ -122,13 +124,13 @@ class DocumentIngestService:
                 kept=MAX_CHUNK_COUNT,
             )
 
-        # 生成向量（批量，节省 API 调用）
-        llm = get_llm_gateway()
-        embeddings = await llm.embed(chunks_text)
-
         # 批量写入 document_chunks
+        # embedding 暂不在此处生成：
+        #   1. DeepSeek 不支持 OpenAI text-embedding-3-small 模型，调用会挂死
+        #   2. 原 INSERT SQL 也未包含 embedding 列，计算结果从未写入数据库
+        # 向量化将在知识归一化阶段按实体粒度单独处理。
         chunk_rows = []
-        for idx, (chunk_text, emb) in enumerate(zip(chunks_text, embeddings)):
+        for idx, chunk_text in enumerate(chunks_text):
             chunk_rows.append({
                 "chunk_id":    str(uuid.uuid4()),
                 "document_id": document_id,
@@ -136,7 +138,6 @@ class DocumentIngestService:
                 "title_path":  "[]",
                 "content":     chunk_text,
                 "token_count": len(chunk_text) // 4,  # 粗估
-                "embedding":   str(emb),               # pgvector 格式
             })
 
         for i in range(0, len(chunk_rows), BATCH_SIZE):
@@ -147,7 +148,7 @@ class DocumentIngestService:
                         INSERT INTO document_chunks
                           (chunk_id, document_id, index_no, title_path, content, token_count)
                         VALUES
-                          (:chunk_id, :document_id, :index_no, :title_path::jsonb, :content, :token_count)
+                          (:chunk_id, :document_id, :index_no, CAST(:title_path AS jsonb), :content, :token_count)
                     """),
                     row
                 )

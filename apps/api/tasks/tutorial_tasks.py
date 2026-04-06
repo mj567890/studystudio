@@ -41,6 +41,12 @@ celery_app.conf.update(
     enable_utc            = True,
     task_acks_late        = True,
     worker_prefetch_multiplier = 1,
+    # 明确列出所有任务模块，确保 worker 启动时全部加载
+    # 不加这行时，knowledge_tasks 因从未被 import 而对 worker 不可见
+    include = [
+        "apps.api.tasks.tutorial_tasks",
+        "apps.api.tasks.knowledge_tasks",
+    ],
     task_routes = {
         "apps.api.tasks.tutorial_tasks.generate_skeleton":        {"queue": "tutorial"},
         "apps.api.tasks.tutorial_tasks.generate_content":         {"queue": "tutorial"},

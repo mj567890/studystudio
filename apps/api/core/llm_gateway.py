@@ -2,10 +2,12 @@
 apps/api/core/llm_gateway.py
 LLM 统一网关 —— 支持模型路由、结构化输出、三级降级
 
-V2.6 关键设计：
-- teach() 返回 TeachResponse（结构化 JSON），不再依赖关键词匹配
-- 三级降级：主模型 → 备用模型 → 检索模板回答
-- RRF 分数归一化函数在此定义
+修复记录：
+  FIX-F: AsyncOpenAI 客户端增加 timeout=30 秒，防止 DeepSeek 无响应时任务挂死。
+  FIX-G: embed() 增加 try/except，失败时返回空列表并记录警告，不再挂死整个任务。
+         DeepSeek 不支持 OpenAI text-embedding-3-small 模型，
+         调用 /v1/embeddings 会超时，需优雅降级。
+  FIX-H: _paragraph_coherence() 增加对空向量的保护，embed 失败时直接返回 0.5。
 """
 import json
 import re
@@ -53,11 +55,7 @@ class TeachResponse:
 
 
 def normalize_rrf_score(raw_rrf: float, num_paths: int = 2, k: int = 60) -> float:
-    """
-    将 RRF 原始分归一化到 [0, 1]。
-    RRF 最大值约为 num_paths / (k + 1)（所有路径均排第一时）。
-    归一化后确保置信度公式中检索项具有实际意义。
-    """
+    """将 RRF 原始分归一化到 [0, 1]。"""
     if raw_rrf <= 0:
         return 0.0
     max_possible = num_paths / (k + 1)
@@ -67,7 +65,6 @@ def normalize_rrf_score(raw_rrf: float, num_paths: int = 2, k: int = 60) -> floa
 class LLMGateway:
     """统一 LLM 调用入口，支持模型路由和三级降级。"""
 
-    # 模型路由配置
     MODEL_ROUTES: dict[str, str] = {
         "teaching_chat_simple":  "deepseek-chat",
         "teaching_chat_complex": "deepseek-chat",
@@ -78,9 +75,11 @@ class LLMGateway:
     }
 
     def __init__(self) -> None:
+        # FIX-F：增加 timeout=30 秒，防止 API 无响应时任务永久挂死
         self._client = AsyncOpenAI(
             api_key=CONFIG.llm.openai_api_key,
             base_url=CONFIG.llm.openai_base_url,
+            timeout=30.0,
         )
 
     def _get_model(self, route: str) -> str:
@@ -94,11 +93,7 @@ class LLMGateway:
         user_message: str,
         knowledge_context: list[Any],
     ) -> TeachResponse:
-        """
-        教学对话调用，返回结构化 TeachResponse。
-        三级降级：主模型 → 备用模型(gpt-4o-mini) → 检索模板回答
-        """
-        # 构建知识上下文摘要
+        """教学对话调用，返回结构化 TeachResponse。三级降级。"""
         context_text = "\n".join(
             f"- {item.canonical_name}: {getattr(item, 'short_definition', '')}"
             for item in knowledge_context[:5]
@@ -111,7 +106,7 @@ class LLMGateway:
         )
 
         msgs = [{"role": "system", "content": full_system}]
-        msgs.extend(messages[-6:])   # 最近 6 轮
+        msgs.extend(messages[-6:])
         msgs.append({"role": "user", "content": user_message})
 
         try:
@@ -132,7 +127,6 @@ class LLMGateway:
             response_format={"type": "json_object"},
         )
         raw = resp.choices[0].message.content or "{}"
-        # 清理可能的 markdown 代码块包裹
         raw = re.sub(r"^```json\s*|\s*```$", "", raw.strip())
         data = json.loads(raw)
         return TeachResponse(
@@ -166,22 +160,36 @@ class LLMGateway:
         return resp.choices[0].message.content or ""
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        """批量文本向量化。"""
-        resp = await self._client.embeddings.create(
-            model=CONFIG.llm.embedding_model,
-            input=texts,
-        )
-        return [item.embedding for item in resp.data]
+        """
+        批量文本向量化。
+        FIX-G：DeepSeek 不支持 OpenAI embedding 模型，调用会超时挂死。
+               失败时返回空列表（每个文本对应一个 []），上层调用方需处理空向量。
+               当 embedding 服务可用时（如配置了 EMBEDDING_MODEL），正常调用。
+        """
+        if not texts:
+            return []
+        try:
+            resp = await self._client.embeddings.create(
+                model=CONFIG.llm.embedding_model,
+                input=texts,
+            )
+            return [item.embedding for item in resp.data]
+        except Exception as e:
+            # FIX-G：优雅降级，不让 embedding 失败阻断整个任务流程
+            logger.warning(
+                "Embedding failed, returning empty vectors",
+                model=CONFIG.llm.embedding_model,
+                text_count=len(texts),
+                error=str(e),
+            )
+            return [[] for _ in texts]
 
     async def embed_single(self, text: str) -> list[float]:
         results = await self.embed([text])
-        return results[0]
+        return results[0] if results else []
 
     async def evaluate_coherence(self, content: str) -> float:
-        """
-        LLM 辅助连贯性评分（仅作参考，不用于门禁判断）。
-        返回 1-5 分，调用方除以 5.0 归一化。
-        """
+        """LLM 辅助连贯性评分（仅作参考，不用于门禁判断）。返回 1-5 分。"""
         prompt = (
             "请评估以下教学文本的逻辑连贯性，给出 1-5 的整数评分。"
             "1=完全不连贯，5=逻辑非常清晰。只输出数字，不要其他内容。\n\n"

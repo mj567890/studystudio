@@ -8,6 +8,19 @@ FastAPI 应用主入口
 3. 初始化 MinIO 客户端
 4. 注册所有路由
 5. 启动事件消费者
+
+修复记录：
+  FIX-D: startup() 中新增对 document_parsed 事件的订阅，
+          触发 knowledge_tasks.run_extraction Celery 任务，
+          解决"知识点审核为空"问题——之前事件发布后无人处理。
+  FIX-E: startup() 中新增对 skeleton_generated 事件的订阅，
+          触发 generate_annotations Celery 任务。
+  FIX-F: startup() 中新增对 file_uploaded 事件的订阅，
+          触发 knowledge_tasks.run_ingest Celery 任务，
+          解决"文件上传后无人触发文档解析"问题。
+  FIX-G: run_ingest / run_extraction 改用 apply_async(queue="knowledge")，
+          确保任务进入 celery_worker 实际监听的 knowledge 队列，
+          而非默认的 celery 队列（无人消费）。
 """
 import structlog
 import uvicorn
@@ -69,9 +82,97 @@ def create_app() -> FastAPI:
         logger.info("Starting up Adaptive Learning Platform API")
         await init_db()
         get_minio_client()   # 初始化 MinIO 客户端（确保 bucket 存在）
+
         event_bus = get_event_bus()
         await event_bus.connect()
-        logger.info("Startup complete")
+
+        # ── FIX-F：订阅 file_uploaded 事件 ──────────────────────────
+        async def on_file_uploaded(envelope: dict) -> None:
+            payload    = envelope.get("payload", {})
+            file_id    = payload.get("file_id")
+            minio_key  = payload.get("minio_key")
+            space_type = payload.get("space_type", "personal")
+            space_id   = payload.get("space_id")
+            owner_id   = payload.get("owner_id")
+            file_name  = payload.get("file_name")
+
+            if not file_id or not minio_key:
+                logger.warning("file_uploaded event missing required fields", envelope=envelope)
+                return
+
+            logger.info(
+                "file_uploaded received, dispatching ingest",
+                file_id=file_id,
+                file_name=file_name,
+            )
+            # FIX-G：指定 queue="knowledge"，确保进入 worker 监听的队列
+            from apps.api.tasks.knowledge_tasks import run_ingest
+            run_ingest.apply_async(
+                args=[file_id, minio_key, space_type, space_id, owner_id, file_name],
+                queue="knowledge",
+            )
+
+        await event_bus.subscribe(
+            event_name="file_uploaded",
+            queue_name="knowledge.ingest.queue",
+            handler=on_file_uploaded,
+        )
+
+        # ── FIX-D：订阅 document_parsed 事件 ──────────────────────────
+        async def on_document_parsed(envelope: dict) -> None:
+            payload = envelope.get("payload", {})
+            document_id = payload.get("document_id")
+            space_type  = payload.get("space_type", "personal")
+            space_id    = payload.get("space_id")
+
+            if not document_id:
+                logger.warning("document_parsed event missing document_id", envelope=envelope)
+                return
+
+            logger.info(
+                "document_parsed received, dispatching extraction",
+                document_id=document_id,
+                space_type=space_type,
+            )
+            # FIX-G：指定 queue="knowledge"
+            from apps.api.tasks.knowledge_tasks import run_extraction
+            run_extraction.apply_async(
+                args=[document_id, space_type, space_id],
+                queue="knowledge",
+            )
+
+        await event_bus.subscribe(
+            event_name="document_parsed",
+            queue_name="knowledge.extraction.queue",
+            handler=on_document_parsed,
+        )
+
+        # ── FIX-E：订阅 skeleton_generated 事件 ───────────────────────
+        async def on_skeleton_generated(envelope: dict) -> None:
+            payload      = envelope.get("payload", {})
+            tutorial_id  = payload.get("tutorial_id")
+            topic_key    = payload.get("topic_key")
+            user_id      = payload.get("requesting_user_id")
+
+            if not all([tutorial_id, topic_key, user_id]):
+                logger.warning("skeleton_generated event missing fields", payload=payload)
+                return
+
+            logger.info(
+                "skeleton_generated received, dispatching annotations",
+                tutorial_id=tutorial_id,
+                topic_key=topic_key,
+            )
+            from apps.api.tasks.tutorial_tasks import generate_annotations
+            generate_annotations.delay(tutorial_id, topic_key, user_id)
+
+        await event_bus.subscribe(
+            event_name="skeleton_generated",
+            queue_name="tutorial.annotations.queue",
+            handler=on_skeleton_generated,
+        )
+
+        logger.info("Startup complete — event subscriptions active")
 
     @app.on_event("shutdown")
     async def shutdown() -> None:
