@@ -90,7 +90,6 @@ async def _ensure_knowledge_space(
                     FROM knowledge_spaces
                     WHERE space_type = :space_type
                       AND name = :name
-                    ORDER BY created_at ASC
                     LIMIT 1
                 """
             ),
@@ -105,7 +104,6 @@ async def _ensure_knowledge_space(
                     WHERE space_type = :space_type
                       AND owner_id::text = :owner_id
                       AND name = :name
-                    ORDER BY created_at ASC
                     LIMIT 1
                 """
             ),
@@ -167,6 +165,16 @@ async def upload_file(
             detail={"code": "DOC_003", "msg": f"Unsupported space_type: {space_type}"},
         )
 
+    if space_type == "global":
+        user_roles = set(current_user.get("roles", []))
+        if not user_roles.intersection({"admin", "knowledge_reviewer"}):
+            raise HTTPException(
+                status_code=403,
+                detail={"code": "AUTH_002", "msg": "Insufficient permissions for global knowledge space"},
+            )
+
+    normalized_domain_tag = _normalize_domain_tag(domain_tag)
+
     content = await file.read()
     if len(content) > MAX_SIZE_BYTES:
         raise HTTPException(
@@ -178,7 +186,7 @@ async def upload_file(
         db,
         space_type=space_type,
         owner_id=current_user["user_id"],
-        domain_tag=domain_tag,
+        domain_tag=normalized_domain_tag,
         space_id=space_id,
     )
 
@@ -234,6 +242,7 @@ async def upload_file(
                     "file_id": str(existing.file_id),
                     "document_id": str(existing_doc.document_id),
                     "space_id": effective_space_id,
+                    "domain_tag": normalized_domain_tag,
                     "is_duplicate": True,
                     "reused_document": True,
                     "requeued": False,
@@ -269,6 +278,7 @@ async def upload_file(
             "data": {
                 "file_id": str(existing.file_id),
                 "space_id": effective_space_id,
+                "domain_tag": normalized_domain_tag,
                 "is_duplicate": True,
                 "reused_document": False,
                 "requeued": True,
@@ -340,6 +350,7 @@ async def upload_file(
             "file_size": len(content),
             "storage_url": storage_url,
             "space_id": effective_space_id,
+            "domain_tag": normalized_domain_tag,
             "is_duplicate": False,
         },
     }

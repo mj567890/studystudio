@@ -37,13 +37,13 @@ async def get_domains(
     """获取可见领域列表；优先展示 knowledge_spaces，同时兼容历史实体数据。"""
     result = await db.execute(
         text("""
-            WITH entity_domains AS (
+            WITH entity_counts AS (
                 SELECT
+                    COALESCE(ke.space_id::text, '') AS entity_space_id,
                     ke.domain_tag,
                     ke.space_type,
                     COUNT(*) AS entity_count,
-                    COALESCE(SUM(CASE WHEN ke.is_core THEN 1 ELSE 0 END), 0) AS core_count,
-                    MAX(ke.created_at) AS sort_time
+                    COALESCE(SUM(CASE WHEN ke.is_core THEN 1 ELSE 0 END), 0) AS core_count
                 FROM knowledge_entities ke
                 WHERE ke.review_status IN ('pending', 'approved')
                   AND ke.domain_tag IS NOT NULL
@@ -57,44 +57,55 @@ async def get_domains(
                             WHERE ks.owner_id::text = :user_id
                         )
                   )
-                GROUP BY ke.domain_tag, ke.space_type
+                GROUP BY COALESCE(ke.space_id::text, ''), ke.domain_tag, ke.space_type
             ),
-            space_domains AS (
+            space_rows AS (
                 SELECT
                     ks.space_id::text AS space_id,
                     ks.name AS domain_tag,
                     ks.space_type,
-                    ks.created_at AS sort_time
+                    COALESCE(MAX(ec.entity_count), 0) AS entity_count,
+                    COALESCE(MAX(ec.core_count), 0) AS core_count
                 FROM knowledge_spaces ks
+                LEFT JOIN entity_counts ec
+                  ON (
+                        ec.entity_space_id = ks.space_id::text
+                     OR (
+                            ec.entity_space_id = ''
+                        AND ec.domain_tag = ks.name
+                        AND ec.space_type = ks.space_type
+                     )
+                  )
                 WHERE ks.name IS NOT NULL
                   AND ks.name <> ''
                   AND (
                         ks.space_type = 'global'
                      OR ks.owner_id::text = :user_id
                   )
+                GROUP BY ks.space_id::text, ks.name, ks.space_type
             ),
-            merged AS (
+            legacy_rows AS (
                 SELECT
-                    sd.space_id,
-                    COALESCE(sd.domain_tag, ed.domain_tag) AS domain_tag,
-                    COALESCE(sd.space_type, ed.space_type) AS space_type,
-                    COALESCE(ed.entity_count, 0) AS entity_count,
-                    COALESCE(ed.core_count, 0) AS core_count,
-                    COALESCE(ed.sort_time, sd.sort_time) AS sort_time
-                FROM space_domains sd
-                FULL OUTER JOIN entity_domains ed
-                  ON sd.domain_tag = ed.domain_tag
-                 AND sd.space_type = ed.space_type
+                    NULL::text AS space_id,
+                    ec.domain_tag,
+                    ec.space_type,
+                    ec.entity_count,
+                    ec.core_count
+                FROM entity_counts ec
+                LEFT JOIN knowledge_spaces ks
+                  ON ks.name = ec.domain_tag
+                 AND ks.space_type = ec.space_type
+                WHERE ks.space_id IS NULL
             )
             SELECT space_id, domain_tag, space_type, entity_count, core_count
-            FROM merged
-            WHERE domain_tag IS NOT NULL
+            FROM space_rows
+            UNION ALL
+            SELECT space_id, domain_tag, space_type, entity_count, core_count
+            FROM legacy_rows
             ORDER BY CASE WHEN space_type = 'global' THEN 0 ELSE 1 END,
-                     entity_count DESC,
-                     sort_time DESC NULLS LAST,
                      domain_tag ASC
         """),
-        {"user_id": current_user["user_id"]}
+        {"user_id": current_user["user_id"]},
     )
     domains = [
         {
@@ -135,7 +146,6 @@ async def create_knowledge_space(
                 FROM knowledge_spaces
                 WHERE space_type = :space_type
                   AND name = :name
-                ORDER BY created_at ASC
                 LIMIT 1
             """),
             {"space_type": req.space_type, "name": space_name},
@@ -148,7 +158,6 @@ async def create_knowledge_space(
                 WHERE space_type = :space_type
                   AND owner_id::text = :owner_id
                   AND name = :name
-                ORDER BY created_at ASC
                 LIMIT 1
             """),
             {
@@ -215,10 +224,12 @@ async def get_my_documents(
         text("""
             SELECT d.document_id, d.title, d.document_status,
                    d.chunk_count, d.is_truncated, d.original_chunk_count,
-                   d.space_type, d.created_at, d.updated_at,
+                   d.space_type, d.space_id, d.created_at, d.updated_at,
+                   ks.name AS domain_tag,
                    f.file_name, f.file_size, f.file_type
             FROM documents d
             LEFT JOIN files f ON d.file_id = f.file_id
+            LEFT JOIN knowledge_spaces ks ON ks.space_id::text = d.space_id::text
             WHERE d.owner_id = :user_id
             ORDER BY d.created_at DESC
             LIMIT 50
@@ -233,6 +244,8 @@ async def get_my_documents(
             "chunk_count":     row.chunk_count,
             "is_truncated":    row.is_truncated,
             "space_type":      row.space_type,
+            "space_id":        str(row.space_id) if row.space_id else None,
+            "domain_tag":      row.domain_tag,
             "file_name":       row.file_name,
             "file_size":       row.file_size,
             "file_type":       row.file_type,
@@ -241,7 +254,6 @@ async def get_my_documents(
         for row in result.fetchall()
     ]
     return {"code": 200, "msg": "success", "data": {"documents": docs}}
-
 
 # ════════════════════════════════════════════════════════════════
 # FE-A02：用户管理
@@ -418,20 +430,44 @@ async def get_init_status(
         text("SELECT config_value FROM system_configs WHERE config_key = 'init_completed'")
     )
     row = result.fetchone()
-    init_completed = row and row.config_value == "true"
+    stored_init_completed = bool(row and row.config_value == "true")
 
-    # 统计知识点数量
-    entity_result = await db.execute(
+    approved_entity_result = await db.execute(
         text("SELECT COUNT(*) as cnt FROM knowledge_entities WHERE review_status = 'approved'")
     )
-    entity_count = entity_result.fetchone().cnt
+    approved_entity_count = approved_entity_result.fetchone().cnt
+
+    any_entity_result = await db.execute(
+        text("SELECT COUNT(*) as cnt FROM knowledge_entities")
+    )
+    total_entity_count = any_entity_result.fetchone().cnt
+
+    space_result = await db.execute(
+        text("SELECT COUNT(*) as cnt FROM knowledge_spaces")
+    )
+    space_count = space_result.fetchone().cnt
+
+    document_result = await db.execute(
+        text("SELECT COUNT(*) as cnt FROM documents")
+    )
+    document_count = document_result.fetchone().cnt
+
+    has_user_content = any([
+        approved_entity_count > 0,
+        total_entity_count > 0,
+        space_count > 0,
+        document_count > 0,
+    ])
 
     return {
         "code": 200, "msg": "success",
         "data": {
-            "init_completed":  init_completed,
-            "entity_count":    entity_count,
-            "needs_seed":      entity_count == 0,
+            "init_completed":  stored_init_completed or has_user_content,
+            "entity_count":    approved_entity_count,
+            "needs_seed":      not has_user_content,
+            "space_count":     space_count,
+            "document_count":  document_count,
+            "total_entity_count": total_entity_count,
         }
     }
 

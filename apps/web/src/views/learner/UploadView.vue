@@ -36,7 +36,7 @@
                 :value="d.domain_tag"
               />
             </el-select>
-            <p class="field-hint">没有合适的领域时，直接在下面输入新领域名。</p>
+            <p class="field-hint">当前知识空间下没有可选领域时，直接在下面输入新领域名。</p>
           </div>
 
           <div class="section-block">
@@ -54,7 +54,7 @@
             <p class="field-label">知识空间</p>
             <el-radio-group v-model="spaceType">
               <el-radio label="personal">个人知识库（仅自己可见）</el-radio>
-              <el-radio label="global" :disabled="!auth.isAdmin">全局知识库（需管理员权限）</el-radio>
+              <el-radio label="global" :disabled="!canUseGlobal">全局知识库（需管理员/审核员权限）</el-radio>
             </el-radio-group>
           </div>
 
@@ -123,6 +123,11 @@ import { fileApi, knowledgeApi } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 
 const auth = useAuthStore()
+const authState = auth as any
+const canUseGlobal = computed(() => {
+  const roles = authState.user?.roles || authState.roles || []
+  return Boolean(authState.isAdmin || roles.includes('admin') || roles.includes('knowledge_reviewer'))
+})
 const uploading = ref(false)
 const domainsLoading = ref(false)
 const docsLoading = ref(false)
@@ -130,7 +135,7 @@ const fileList = ref<any[]>([])
 const selectedFile = ref<File | null>(null)
 const selectedExistingDomain = ref('')
 const newDomainName = ref('')
-const spaceType = ref('personal')
+const spaceType = ref(canUseGlobal.value ? 'global' : 'personal')
 const uploadResult = ref<any>(null)
 const domains = ref<any[]>([])
 const documents = ref<any[]>([])
@@ -246,6 +251,15 @@ async function loadDomains() {
   try {
     const res: any = await knowledgeApi.getDomains()
     domains.value = res.data?.domains || []
+
+    const hasCurrentDomains = domains.value.some((item: any) => item.space_type === spaceType.value)
+    if (!hasCurrentDomains) {
+      if (canUseGlobal.value && domains.value.some((item: any) => item.space_type === 'global')) {
+        spaceType.value = 'global'
+      } else if (domains.value.some((item: any) => item.space_type === 'personal')) {
+        spaceType.value = 'personal'
+      }
+    }
   } catch {
     // 交给全局拦截器提示
   } finally {
