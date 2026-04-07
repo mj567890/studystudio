@@ -26,6 +26,23 @@ logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/api", tags=["admin"])
 
 
+async def _safe_count(db: AsyncSession, sql: str, params: dict | None = None) -> int:
+    """Best-effort COUNT helper; returns 0 instead of raising."""
+    try:
+        result = await db.execute(text(sql), params or {})
+        row = result.fetchone()
+        if not row:
+            return 0
+        value = getattr(row, "cnt", None)
+        if value is None and len(row) > 0:
+            value = row[0]
+        return int(value or 0)
+    except Exception as e:
+        logger.warning("safe_count_failed", sql=sql, error=str(e))
+        return 0
+
+
+
 # ════════════════════════════════════════════════════════════════
 # FE-A01：领域查询 + 文档列表
 # ════════════════════════════════════════════════════════════════
@@ -34,89 +51,76 @@ async def get_domains(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ) -> dict:
-    """获取可见领域列表；优先展示 knowledge_spaces，同时兼容历史实体数据。"""
-    result = await db.execute(
-        text("""
-            WITH entity_counts AS (
-                SELECT
-                    COALESCE(ke.space_id::text, '') AS entity_space_id,
-                    ke.domain_tag,
-                    ke.space_type,
-                    COUNT(*) AS entity_count,
-                    COALESCE(SUM(CASE WHEN ke.is_core THEN 1 ELSE 0 END), 0) AS core_count
-                FROM knowledge_entities ke
-                WHERE ke.review_status IN ('pending', 'approved')
-                  AND ke.domain_tag IS NOT NULL
-                  AND ke.domain_tag <> ''
-                  AND (
-                        ke.space_type = 'global'
-                     OR ke.space_type = 'course'
-                     OR ke.space_id::text IN (
-                            SELECT ks.space_id::text
-                            FROM knowledge_spaces ks
-                            WHERE ks.owner_id::text = :user_id
-                        )
-                  )
-                GROUP BY COALESCE(ke.space_id::text, ''), ke.domain_tag, ke.space_type
-            ),
-            space_rows AS (
+    """获取可见领域列表。优先从 knowledge_spaces 返回，避免实体统计异常导致 500。"""
+    domains: list[dict] = []
+
+    try:
+        result = await db.execute(
+            text("""
                 SELECT
                     ks.space_id::text AS space_id,
                     ks.name AS domain_tag,
                     ks.space_type,
-                    COALESCE(MAX(ec.entity_count), 0) AS entity_count,
-                    COALESCE(MAX(ec.core_count), 0) AS core_count
+                    0 AS entity_count,
+                    0 AS core_count
                 FROM knowledge_spaces ks
-                LEFT JOIN entity_counts ec
-                  ON (
-                        ec.entity_space_id = ks.space_id::text
-                     OR (
-                            ec.entity_space_id = ''
-                        AND ec.domain_tag = ks.name
-                        AND ec.space_type = ks.space_type
-                     )
-                  )
                 WHERE ks.name IS NOT NULL
                   AND ks.name <> ''
                   AND (
                         ks.space_type = 'global'
                      OR ks.owner_id::text = :user_id
                   )
-                GROUP BY ks.space_id::text, ks.name, ks.space_type
-            ),
-            legacy_rows AS (
-                SELECT
-                    NULL::text AS space_id,
-                    ec.domain_tag,
-                    ec.space_type,
-                    ec.entity_count,
-                    ec.core_count
-                FROM entity_counts ec
-                LEFT JOIN knowledge_spaces ks
-                  ON ks.name = ec.domain_tag
-                 AND ks.space_type = ec.space_type
-                WHERE ks.space_id IS NULL
+                ORDER BY CASE WHEN ks.space_type = 'global' THEN 0 ELSE 1 END,
+                         ks.name ASC
+            """),
+            {"user_id": current_user["user_id"]},
+        )
+        domains = [
+            {
+                "space_id": row.space_id,
+                "domain_tag": row.domain_tag,
+                "space_type": row.space_type,
+                "entity_count": int(row.entity_count or 0),
+                "core_count": int(row.core_count or 0),
+            }
+            for row in result.fetchall()
+        ]
+    except Exception as e:
+        logger.warning("get_domains_space_query_failed", error=str(e))
+
+    if not domains:
+        try:
+            result = await db.execute(
+                text("""
+                    SELECT
+                        NULL::text AS space_id,
+                        ke.domain_tag,
+                        ke.space_type,
+                        COUNT(*) AS entity_count,
+                        COALESCE(SUM(CASE WHEN ke.is_core THEN 1 ELSE 0 END), 0) AS core_count
+                    FROM knowledge_entities ke
+                    WHERE ke.review_status IN ('pending', 'approved')
+                      AND ke.domain_tag IS NOT NULL
+                      AND ke.domain_tag <> ''
+                    GROUP BY ke.domain_tag, ke.space_type
+                    ORDER BY CASE WHEN ke.space_type = 'global' THEN 0 ELSE 1 END,
+                             ke.domain_tag ASC
+                """)
             )
-            SELECT space_id, domain_tag, space_type, entity_count, core_count
-            FROM space_rows
-            UNION ALL
-            SELECT space_id, domain_tag, space_type, entity_count, core_count
-            FROM legacy_rows
-            ORDER BY CASE WHEN space_type = 'global' THEN 0 ELSE 1 END,
-                     domain_tag ASC
-        """),
-        {"user_id": current_user["user_id"]},
-    )
-    domains = [
-        {
-            "space_id": row.space_id,
-            "domain_tag": row.domain_tag,
-            "space_type": row.space_type,
-            "entity_count": row.entity_count,
-            "core_count": row.core_count,
-        }
-        for row in result.fetchall()
-    ]
+            domains = [
+                {
+                    "space_id": row.space_id,
+                    "domain_tag": row.domain_tag,
+                    "space_type": row.space_type,
+                    "entity_count": int(row.entity_count or 0),
+                    "core_count": int(row.core_count or 0),
+                }
+                for row in result.fetchall()
+            ]
+        except Exception as e:
+            logger.warning("get_domains_legacy_query_failed", error=str(e))
+            domains = []
+
     return {"code": 200, "msg": "success", "data": {"domains": domains}}
 
 
@@ -219,40 +223,45 @@ async def get_my_documents(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ) -> dict:
-    """获取当前用户上传的文档列表及解析状态。"""
-    result = await db.execute(
-        text("""
-            SELECT d.document_id, d.title, d.document_status,
-                   d.chunk_count, d.is_truncated, d.original_chunk_count,
-                   d.space_type, d.space_id, d.created_at, d.updated_at,
-                   ks.name AS domain_tag,
-                   f.file_name, f.file_size, f.file_type
-            FROM documents d
-            LEFT JOIN files f ON d.file_id = f.file_id
-            LEFT JOIN knowledge_spaces ks ON ks.space_id::text = d.space_id::text
-            WHERE d.owner_id = :user_id
-            ORDER BY d.created_at DESC
-            LIMIT 50
-        """),
-        {"user_id": current_user["user_id"]}
-    )
-    docs = [
-        {
-            "document_id":     str(row.document_id),
-            "title":           row.title,
-            "status":          row.document_status,
-            "chunk_count":     row.chunk_count,
-            "is_truncated":    row.is_truncated,
-            "space_type":      row.space_type,
-            "space_id":        str(row.space_id) if row.space_id else None,
-            "domain_tag":      row.domain_tag,
-            "file_name":       row.file_name,
-            "file_size":       row.file_size,
-            "file_type":       row.file_type,
-            "created_at":      row.created_at.isoformat() if row.created_at else None,
-        }
-        for row in result.fetchall()
-    ]
+    """获取当前用户上传的文档列表及解析状态。异常时返回空列表，不让页面炸掉。"""
+    try:
+        result = await db.execute(
+            text("""
+                SELECT d.document_id, d.title, d.document_status,
+                       d.chunk_count, d.is_truncated, d.original_chunk_count,
+                       d.space_type, d.space_id, d.created_at,
+                       ks.name AS domain_tag,
+                       f.file_name, f.file_size, f.file_type
+                FROM documents d
+                LEFT JOIN files f ON d.file_id = f.file_id
+                LEFT JOIN knowledge_spaces ks ON ks.space_id::text = d.space_id::text
+                WHERE d.owner_id = :user_id
+                ORDER BY d.created_at DESC
+                LIMIT 50
+            """),
+            {"user_id": current_user["user_id"]},
+        )
+        docs = [
+            {
+                "document_id": str(row.document_id),
+                "title": row.title,
+                "status": row.document_status,
+                "chunk_count": row.chunk_count,
+                "is_truncated": row.is_truncated,
+                "space_type": row.space_type,
+                "space_id": str(row.space_id) if row.space_id else None,
+                "domain_tag": row.domain_tag,
+                "file_name": row.file_name,
+                "file_size": row.file_size,
+                "file_type": row.file_type,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+            }
+            for row in result.fetchall()
+        ]
+    except Exception as e:
+        logger.warning("get_my_documents_failed", error=str(e), user_id=current_user.get("user_id"))
+        docs = []
+
     return {"code": 200, "msg": "success", "data": {"documents": docs}}
 
 # ════════════════════════════════════════════════════════════════
@@ -425,32 +434,33 @@ async def get_init_status(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(require_role("admin")),
 ) -> dict:
-    """获取系统初始化状态。"""
-    result = await db.execute(
-        text("SELECT config_value FROM system_configs WHERE config_key = 'init_completed'")
-    )
-    row = result.fetchone()
-    stored_init_completed = bool(row and row.config_value == "true")
+    """获取系统初始化状态。任何单表查询失败都降级为 0，避免管理首页 500。"""
+    stored_init_completed = False
+    try:
+        result = await db.execute(
+            text("SELECT config_value FROM system_configs WHERE config_key = 'init_completed'")
+        )
+        row = result.fetchone()
+        stored_init_completed = bool(row and row.config_value == "true")
+    except Exception as e:
+        logger.warning("get_init_status_config_failed", error=str(e))
 
-    approved_entity_result = await db.execute(
-        text("SELECT COUNT(*) as cnt FROM knowledge_entities WHERE review_status = 'approved'")
+    approved_entity_count = await _safe_count(
+        db,
+        "SELECT COUNT(*) AS cnt FROM knowledge_entities WHERE review_status = 'approved'",
     )
-    approved_entity_count = approved_entity_result.fetchone().cnt
-
-    any_entity_result = await db.execute(
-        text("SELECT COUNT(*) as cnt FROM knowledge_entities")
+    total_entity_count = await _safe_count(
+        db,
+        "SELECT COUNT(*) AS cnt FROM knowledge_entities",
     )
-    total_entity_count = any_entity_result.fetchone().cnt
-
-    space_result = await db.execute(
-        text("SELECT COUNT(*) as cnt FROM knowledge_spaces")
+    space_count = await _safe_count(
+        db,
+        "SELECT COUNT(*) AS cnt FROM knowledge_spaces",
     )
-    space_count = space_result.fetchone().cnt
-
-    document_result = await db.execute(
-        text("SELECT COUNT(*) as cnt FROM documents")
+    document_count = await _safe_count(
+        db,
+        "SELECT COUNT(*) AS cnt FROM documents",
     )
-    document_count = document_result.fetchone().cnt
 
     has_user_content = any([
         approved_entity_count > 0,
@@ -460,15 +470,16 @@ async def get_init_status(
     ])
 
     return {
-        "code": 200, "msg": "success",
+        "code": 200,
+        "msg": "success",
         "data": {
-            "init_completed":  stored_init_completed or has_user_content,
-            "entity_count":    approved_entity_count,
-            "needs_seed":      not has_user_content,
-            "space_count":     space_count,
-            "document_count":  document_count,
+            "init_completed": stored_init_completed or has_user_content,
+            "entity_count": approved_entity_count,
+            "needs_seed": not has_user_content,
+            "space_count": space_count,
+            "document_count": document_count,
             "total_entity_count": total_entity_count,
-        }
+        },
     }
 
 
@@ -676,26 +687,34 @@ async def get_system_stats(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(require_role("admin")),
 ) -> dict:
-    """获取系统统计数据（管理首页使用）。"""
-    stats = {}
-
-    r = await db.execute(text("SELECT COUNT(*) as cnt FROM users WHERE status = 'active'"))
-    stats["active_users"] = r.fetchone().cnt
-
-    r = await db.execute(text("SELECT COUNT(*) as cnt FROM knowledge_entities WHERE review_status = 'approved'"))
-    stats["approved_entities"] = r.fetchone().cnt
-
-    r = await db.execute(text("SELECT COUNT(*) as cnt FROM knowledge_entities WHERE review_status = 'pending'"))
-    stats["pending_entities"] = r.fetchone().cnt
-
-    r = await db.execute(text("SELECT COUNT(*) as cnt FROM conversations"))
-    stats["total_conversations"] = r.fetchone().cnt
-
-    r = await db.execute(text("SELECT COUNT(*) as cnt FROM documents"))
-    stats["total_documents"] = r.fetchone().cnt
-
+    """获取系统统计数据。单项失败按 0 处理，避免首页直接 500。"""
+    stats = {
+        "active_users": await _safe_count(
+            db,
+            "SELECT COUNT(*) AS cnt FROM users WHERE status = 'active'",
+        ),
+        "approved_entities": await _safe_count(
+            db,
+            "SELECT COUNT(*) AS cnt FROM knowledge_entities WHERE review_status = 'approved'",
+        ),
+        "pending_entities": await _safe_count(
+            db,
+            "SELECT COUNT(*) AS cnt FROM knowledge_entities WHERE review_status = 'pending'",
+        ),
+        "total_conversations": await _safe_count(
+            db,
+            "SELECT COUNT(*) AS cnt FROM conversations",
+        ),
+        "total_documents": await _safe_count(
+            db,
+            "SELECT COUNT(*) AS cnt FROM documents",
+        ),
+        "total_spaces": await _safe_count(
+            db,
+            "SELECT COUNT(*) AS cnt FROM knowledge_spaces",
+        ),
+    }
     return {"code": 200, "msg": "success", "data": stats}
-
 
 # ════════════════════════════════════════════════════════════════
 # FE-A05：章节进度
