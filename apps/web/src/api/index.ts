@@ -106,8 +106,22 @@ export const adminApi = {
 
   // 知识审核
   listPendingEntities: () => http.get('/admin/entities/pending'),
+  listEntities: (params: { review_status?: string; domain_tag?: string; limit?: number } = {}) =>
+    http.get('/admin/entities', { params }),
   reviewEntity: (data: { entity_id: string; action: string; reason?: string }) =>
     http.post('/admin/entities/review', data),
+  reviewEntitiesBatch: (data: { entity_ids: string[]; action: string; reason?: string }) =>
+    http.post('/admin/entities/review/batch', data),
+  updateEntity: (data: {
+    entity_id: string
+    canonical_name: string
+    entity_type: string
+    domain_tag: string
+    short_definition?: string
+    detailed_explanation?: string
+    review_status?: string
+    is_core?: boolean
+  }) => http.post('/admin/entities/update', data),
   createKnowledgeSpace: (data: { name: string; space_type?: string; description?: string }) =>
     http.post('/admin/knowledge/spaces', data),
 

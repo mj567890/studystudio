@@ -192,7 +192,9 @@ class SkeletonRepository:
             text("""
                 SELECT skeleton_id::text, tutorial_id::text, topic_key, chapter_tree
                 FROM tutorial_skeletons
-                WHERE topic_key = :topic_key AND status = 'approved'
+                WHERE topic_key = :topic_key
+                  AND status = 'approved'
+                  AND jsonb_array_length(chapter_tree) > 0
                 LIMIT 1
             """),
             {"topic_key": topic_key}
@@ -215,6 +217,7 @@ class SkeletonRepository:
                 SELECT skeleton_id::text, tutorial_id::text, topic_key, chapter_tree, status
                 FROM tutorial_skeletons
                 WHERE topic_key = :topic_key
+                  AND jsonb_array_length(chapter_tree) > 0
                 ORDER BY created_at DESC
                 LIMIT 1
             """),
@@ -241,10 +244,15 @@ class SkeletonRepository:
                 INSERT INTO tutorial_skeletons
                   (skeleton_id, tutorial_id, topic_key, chapter_tree, status)
                 VALUES
-                  (:skeleton_id, :tutorial_id, :topic_key, :chapter_tree::jsonb, 'draft')
+                  (:skeleton_id, :tutorial_id, :topic_key, CAST(:chapter_tree AS jsonb), 'draft')
                 ON CONFLICT (topic_key)
-                DO UPDATE SET skeleton_id = tutorial_skeletons.skeleton_id
-                RETURNING (xmax = 0) AS inserted
+                DO UPDATE SET
+                  skeleton_id = EXCLUDED.skeleton_id,
+                  tutorial_id = EXCLUDED.tutorial_id,
+                  chapter_tree = EXCLUDED.chapter_tree,
+                  status = 'draft'
+                WHERE jsonb_array_length(tutorial_skeletons.chapter_tree) = 0
+                RETURNING tutorial_id::text AS tutorial_id
             """),
             {
                 "skeleton_id":  skeleton["skeleton_id"],
@@ -255,7 +263,7 @@ class SkeletonRepository:
         )
         row = result.fetchone()
         await self.db.commit()
-        return bool(row.inserted) if row else False
+        return bool(row)
 
     async def get(self, tutorial_id: str) -> dict | None:
         result = await self.db.execute(
@@ -271,7 +279,7 @@ class SkeletonRepository:
         await self.db.execute(
             text("""
                 UPDATE tutorial_skeletons
-                SET status = 'approved', updated_at = NOW()
+                SET status = 'approved'
                 WHERE tutorial_id = :tid
             """),
             {"tid": tutorial_id}
@@ -355,16 +363,25 @@ class TutorialGenerationService:
         骨架生成核心逻辑（由 Celery 同步任务包装调用）。
         骨架是主题级通用资产，不传入 user_id，与任何用户无关。
         """
-        # 获取知识子图
+        # 获取知识子图（仅当前领域的已审核知识点）
         entities_result = await self.db.execute(
             text("""
                 SELECT entity_id::text, canonical_name, domain_tag
                 FROM knowledge_entities
                 WHERE review_status = 'approved'
-                ORDER BY domain_tag, canonical_name
-            """)
+                  AND domain_tag = :topic_key
+                ORDER BY canonical_name
+            """),
+            {"topic_key": topic_key}
         )
         entities = [dict(r._mapping) for r in entities_result.fetchall()]
+
+        if not entities:
+            logger.warning(
+                "No approved entities for topic, skip skeleton build",
+                topic_key=topic_key,
+            )
+            return
 
         relations_result = await self.db.execute(
             text("""
@@ -377,7 +394,7 @@ class TutorialGenerationService:
         # B1：拓扑排序（统一 entity_id 字符串操作）
         sorted_entities, cycle_entities = topological_sort_safe(entities, relations)
         if cycle_entities:
-            logger.warning("Cycle in knowledge graph", count=len(cycle_entities))
+            logger.warning("Cycle in knowledge graph", count=len(cycle_entities), topic_key=topic_key)
 
         # 构建章节树
         chapter_tree = [

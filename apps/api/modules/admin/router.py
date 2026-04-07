@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime, timezone
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -360,45 +360,101 @@ async def update_user_status(
 # ════════════════════════════════════════════════════════════════
 # FE-A03：知识审核
 # ════════════════════════════════════════════════════════════════
+_ENTITY_TYPES = {"concept", "element", "flow", "case", "defense"}
+_REVIEW_STATUSES = {"pending", "approved", "rejected"}
+
+
+def _serialize_entity(row) -> dict:
+    return {
+        "entity_id": str(row.entity_id),
+        "name": row.name,
+        "entity_type": row.entity_type,
+        "canonical_name": row.canonical_name,
+        "domain_tag": row.domain_tag,
+        "space_type": row.space_type,
+        "short_definition": row.short_definition,
+        "detailed_explanation": row.detailed_explanation,
+        "review_status": row.review_status,
+        "is_core": bool(row.is_core),
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+async def _fetch_entities(
+    db: AsyncSession,
+    review_status: str,
+    domain_tag: str,
+    limit: int,
+) -> list[dict]:
+    result = await db.execute(
+        text("""
+            SELECT entity_id, name, entity_type, canonical_name,
+                   domain_tag, space_type, short_definition,
+                   detailed_explanation, review_status, is_core,
+                   created_at, updated_at
+            FROM knowledge_entities
+            WHERE (:review_status = 'all' OR review_status = :review_status)
+              AND (:domain_tag = '' OR domain_tag = :domain_tag)
+            ORDER BY created_at DESC
+            LIMIT :limit
+        """),
+        {
+            "review_status": review_status,
+            "domain_tag": domain_tag,
+            "limit": limit,
+        }
+    )
+    return [_serialize_entity(row) for row in result.fetchall()]
+
+
+@router.get("/admin/entities")
+async def list_entities(
+    review_status: str = Query("pending"),
+    domain_tag: str = Query(""),
+    limit: int = Query(200, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_role("admin", "knowledge_reviewer")),
+) -> dict:
+    """获取知识点列表，支持按审核状态筛选。"""
+    if review_status not in (*_REVIEW_STATUSES, "all"):
+        raise HTTPException(400, detail={"code": "REVIEW_002", "msg": "invalid review_status"})
+
+    entities = await _fetch_entities(db, review_status, domain_tag, limit)
+    return {"code": 200, "msg": "success", "data": {"entities": entities, "total": len(entities)}}
+
+
 @router.get("/admin/entities/pending")
 async def list_pending_entities(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(require_role("admin", "knowledge_reviewer")),
 ) -> dict:
-    """获取待审核知识点列表。"""
-    result = await db.execute(
-        text("""
-            SELECT entity_id, name, entity_type, canonical_name,
-                   domain_tag, space_type, short_definition,
-                   review_status, created_at
-            FROM knowledge_entities
-            WHERE review_status = 'pending'
-            ORDER BY created_at DESC
-            LIMIT 100
-        """)
-    )
-    entities = [
-        {
-            "entity_id":       str(row.entity_id),
-            "name":            row.name,
-            "entity_type":     row.entity_type,
-            "canonical_name":  row.canonical_name,
-            "domain_tag":      row.domain_tag,
-            "space_type":      row.space_type,
-            "short_definition": row.short_definition,
-            "review_status":   row.review_status,
-            "created_at":      row.created_at.isoformat() if row.created_at else None,
-        }
-        for row in result.fetchall()
-    ]
-    return {"code": 200, "msg": "success",
-            "data": {"entities": entities, "total": len(entities)}}
+    """兼容旧前端：获取待审核知识点列表。"""
+    entities = await _fetch_entities(db, "pending", "", 200)
+    return {"code": 200, "msg": "success", "data": {"entities": entities, "total": len(entities)}}
 
 
 class ReviewEntityRequest(BaseModel):
     entity_id: str
-    action:    str   # approve / reject
-    reason:    str = ""
+    action: str  # approve / reject
+    reason: str = ""
+
+
+class BatchReviewEntitiesRequest(BaseModel):
+    entity_ids: list[str]
+    action: str  # approve / reject
+    reason: str = ""
+
+
+class UpdateEntityRequest(BaseModel):
+    entity_id: str
+    canonical_name: str
+    entity_type: str
+    domain_tag: str
+    short_definition: str = ""
+    detailed_explanation: str = ""
+    review_status: str | None = None
+    is_core: bool = False
 
 
 @router.post("/admin/entities/review")
@@ -407,7 +463,7 @@ async def review_entity(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(require_role("admin", "knowledge_reviewer")),
 ) -> dict:
-    """审核知识点：通过或驳回。"""
+    """审核单个知识点：通过或驳回。"""
     if req.action not in ("approve", "reject"):
         raise HTTPException(400, detail={"code": "REVIEW_001", "msg": "action must be approve or reject"})
 
@@ -424,6 +480,85 @@ async def review_entity(
     logger.info("Entity reviewed", entity_id=req.entity_id, action=req.action,
                 reviewer=current_user["user_id"])
     return {"code": 200, "msg": "success", "data": {"entity_id": req.entity_id, "status": status}}
+
+
+@router.post("/admin/entities/review/batch")
+async def review_entities_batch(
+    req: BatchReviewEntitiesRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_role("admin", "knowledge_reviewer")),
+) -> dict:
+    """批量审核知识点。"""
+    if req.action not in ("approve", "reject"):
+        raise HTTPException(400, detail={"code": "REVIEW_003", "msg": "action must be approve or reject"})
+    if not req.entity_ids:
+        raise HTTPException(400, detail={"code": "REVIEW_004", "msg": "entity_ids cannot be empty"})
+
+    status = "approved" if req.action == "approve" else "rejected"
+    for entity_id in req.entity_ids:
+        await db.execute(
+            text("""
+                UPDATE knowledge_entities
+                SET review_status = :status, updated_at = NOW()
+                WHERE entity_id = :entity_id
+            """),
+            {"status": status, "entity_id": entity_id}
+        )
+    await db.commit()
+    logger.info(
+        "Entities batch reviewed",
+        count=len(req.entity_ids),
+        action=req.action,
+        reviewer=current_user["user_id"],
+    )
+    return {"code": 200, "msg": "success", "data": {"count": len(req.entity_ids), "status": status}}
+
+
+@router.post("/admin/entities/update")
+async def update_entity(
+    req: UpdateEntityRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_role("admin", "knowledge_reviewer")),
+) -> dict:
+    """修改知识点内容，适用于待审核和已通过知识点。"""
+    if req.entity_type not in _ENTITY_TYPES:
+        raise HTTPException(400, detail={"code": "REVIEW_005", "msg": "invalid entity_type"})
+    if req.review_status is not None and req.review_status not in _REVIEW_STATUSES:
+        raise HTTPException(400, detail={"code": "REVIEW_006", "msg": "invalid review_status"})
+    if not req.canonical_name.strip():
+        raise HTTPException(400, detail={"code": "REVIEW_007", "msg": "canonical_name is required"})
+    if not req.domain_tag.strip():
+        raise HTTPException(400, detail={"code": "REVIEW_008", "msg": "domain_tag is required"})
+
+    sql = """
+        UPDATE knowledge_entities
+        SET name = :canonical_name,
+            canonical_name = :canonical_name,
+            entity_type = :entity_type,
+            domain_tag = :domain_tag,
+            short_definition = :short_definition,
+            detailed_explanation = :detailed_explanation,
+            is_core = :is_core,
+            updated_at = NOW()
+    """
+    params = {
+        "entity_id": req.entity_id,
+        "canonical_name": req.canonical_name.strip(),
+        "entity_type": req.entity_type,
+        "domain_tag": req.domain_tag.strip(),
+        "short_definition": req.short_definition.strip(),
+        "detailed_explanation": req.detailed_explanation.strip(),
+        "is_core": req.is_core,
+    }
+    if req.review_status is not None:
+        sql += ", review_status = :review_status\n"
+        params["review_status"] = req.review_status
+    sql += "WHERE entity_id = :entity_id"
+
+    await db.execute(text(sql), params)
+    await db.commit()
+    logger.info("Entity updated", entity_id=req.entity_id, reviewer=current_user["user_id"])
+    return {"code": 200, "msg": "success", "data": {"entity_id": req.entity_id, "updated": True}}
 
 
 # ════════════════════════════════════════════════════════════════
