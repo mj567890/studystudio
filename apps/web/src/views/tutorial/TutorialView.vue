@@ -1,244 +1,313 @@
 <template>
-  <div class="page">
-    <el-row :gutter="16">
-      <!-- 章节列表 -->
-      <el-col :span="7">
-        <el-card class="chapter-list">
-          <template #header>
-            <div class="header-bar">
-              <el-select v-model="topicKey" placeholder="选择主题" size="small"
-                filterable style="width:100%" :loading="domainsLoading"
-                @change="() => loadTutorial()">
-                <el-option v-for="d in domains" :key="d.domain_tag"
-                  :label="d.domain_tag" :value="d.domain_tag" />
-              </el-select>
-              <el-button size="small" :disabled="!topicKey" :loading="loading"
-                @click="refreshTutorial">
-                重新生成教程
+  <div class="tutorial-page">
+    <div class="toolbar">
+      <el-select
+        v-model="selectedTopic"
+        filterable
+        placeholder="选择领域"
+        class="topic-select"
+        @change="handleTopicChange"
+      >
+        <el-option
+          v-for="item in topics"
+          :key="`${item.space_type}:${item.space_id || 'none'}:${item.topic_key}`"
+          :label="`${item.topic_key} · ${item.chapter_count}章`"
+          :value="item.topic_key"
+        />
+      </el-select>
+
+      <el-button :loading="rebuilding" @click="reloadTopic(false)">刷新</el-button>
+      <el-button type="primary" :loading="rebuilding" @click="reloadTopic(true)">重新生成教程</el-button>
+    </div>
+
+    <div v-if="blueprint" class="summary-card">
+      <el-card>
+        <template #header>
+          <div class="summary-header">
+            <span>{{ blueprint.topic_key }}</span>
+            <el-tag>{{ blueprint.status }}</el-tag>
+            <el-tag type="success">v{{ blueprint.version }}</el-tag>
+          </div>
+        </template>
+        <p class="summary-text">{{ blueprint.skill_goal }}</p>
+        <p class="summary-subtext">{{ blueprint.summary }}</p>
+      </el-card>
+    </div>
+
+    <div class="body">
+      <div class="left">
+        <el-scrollbar height="calc(100vh - 220px)">
+          <div v-if="!blueprint" class="empty-tip">
+            请选择领域后加载技能教程。
+          </div>
+          <div v-else>
+            <div
+              v-for="stage in blueprint.stages"
+              :key="stage.stage_id"
+              class="stage-block"
+            >
+              <div class="stage-title">{{ stage.stage_order }}. {{ stage.title }}</div>
+              <div class="stage-objective">{{ stage.objective }}</div>
+
+              <el-button
+                v-for="chapter in stage.chapters"
+                :key="chapter.chapter_id"
+                class="chapter-btn"
+                :type="activeChapterId === chapter.chapter_id ? 'primary' : 'default'"
+                @click="selectChapter(chapter.chapter_id)"
+              >
+                <div class="chapter-btn-title">{{ chapter.title }}</div>
+                <div class="chapter-btn-sub">{{ chapter.estimated_minutes }} 分钟</div>
               </el-button>
+            </div>
+          </div>
+        </el-scrollbar>
+      </div>
+
+      <div class="center">
+        <el-card v-if="chapterContent">
+          <template #header>
+            <div class="chapter-header">
+              <div>
+                <div class="chapter-title">{{ chapterContent.title }}</div>
+                <div class="chapter-objective">{{ chapterContent.objective }}</div>
+              </div>
+              <el-button text @click="glossaryDrawer = true">查看热词</el-button>
             </div>
           </template>
 
-          <el-skeleton :rows="6" animated v-if="loading" />
-          <div v-else-if="tutorial">
-            <!-- 进度条 -->
-            <div style="margin-bottom:12px">
-              <p style="font-size:12px;color:#909399;margin-bottom:4px">
-                学习进度 {{ completedCount }}/{{ tutorial.chapter_tree?.length || 0 }}
-              </p>
-              <el-progress
-                :percentage="progressPercent"
-                :stroke-width="6"
-                :status="progressPercent === 100 ? 'success' : ''" />
-            </div>
-
-            <div v-for="chapter in tutorial.chapter_tree" :key="chapter.chapter_id"
-              class="chapter-item"
-              :class="{ active: currentChapter?.chapter_id === chapter.chapter_id,
-                        done: progress[chapter.chapter_id]?.completed }"
-              @click="selectChapter(chapter)">
-              <span class="chapter-icon">
-                {{ progress[chapter.chapter_id]?.completed ? '✅' : chapter.order_no }}
-              </span>
-              <span class="chapter-title">{{ chapter.title }}</span>
-            </div>
+          <div class="chapter-meta">
+            <el-tag type="success">学完可做到：{{ chapterContent.can_do_after }}</el-tag>
           </div>
-          <el-empty v-else description="请选择主题" />
-        </el-card>
-      </el-col>
 
-      <!-- 章节内容 -->
-      <el-col :span="17">
-        <el-card>
-          <div v-if="currentChapter">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-              <h2 style="margin:0">{{ currentChapter.title }}</h2>
-              <el-button
-                :type="progress[currentChapter.chapter_id]?.completed ? 'success' : 'primary'"
-                @click="toggleComplete(currentChapter)">
-                {{ progress[currentChapter.chapter_id]?.completed ? '✅ 已完成' : '标记完成' }}
-              </el-button>
-            </div>
-
-            <el-alert v-if="tutorial?.status !== 'approved' || !currentChapter?.content_text" type="warning"
-              title="内容正在按最新知识点生成，请稍后刷新" show-icon :closable="false"
-              style="margin-bottom:16px" />
-
-            <div class="content" v-html="renderedContent" />
-
-            <div style="margin-top:24px;padding-top:16px;border-top:1px solid #eee;
-                        display:flex;justify-content:space-between">
-              <el-button @click="prevChapter" :disabled="!hasPrev">← 上一章</el-button>
-              <el-button type="primary" @click="goChat">向 AI 提问本章内容</el-button>
-              <el-button @click="nextChapter" :disabled="!hasNext">下一章 →</el-button>
-            </div>
+          <div class="section" v-for="section in chapterContent.sections" :key="section.title">
+            <h3>{{ section.title }}</h3>
+            <pre class="section-body">{{ section.body }}</pre>
           </div>
-          <el-empty v-else description="从左侧选择章节开始学习" />
+
+          <div class="section">
+            <h3>练习任务</h3>
+            <pre class="section-body">{{ chapterContent.practice_task }}</pre>
+          </div>
+
+          <div class="section">
+            <h3>通过标准</h3>
+            <pre class="section-body">{{ chapterContent.pass_criteria }}</pre>
+          </div>
+
+          <div class="section">
+            <h3>本章学习点</h3>
+            <ul>
+              <li v-for="item in chapterContent.learning_points" :key="item">{{ item }}</li>
+            </ul>
+          </div>
         </el-card>
-      </el-col>
-    </el-row>
+
+        <el-empty v-else description="选择左侧章节查看内容" />
+      </div>
+    </div>
+
+    <el-drawer v-model="glossaryDrawer" title="本章热词 / 术语解释" size="40%">
+      <div v-if="chapterContent?.glossary?.length">
+        <el-card
+          v-for="item in chapterContent.glossary"
+          :key="`${item.link_role}-${item.entity_id}`"
+          class="glossary-card"
+        >
+          <template #header>
+            <div class="glossary-header">
+              <span>{{ item.canonical_name }}</span>
+              <el-tag size="small">{{ item.entity_type || item.link_role }}</el-tag>
+            </div>
+          </template>
+          <p class="glossary-short">{{ item.short_definition }}</p>
+          <p class="glossary-detail">{{ item.detailed_explanation }}</p>
+        </el-card>
+      </div>
+      <el-empty v-else description="本章还没有热词解释" />
+    </el-drawer>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
-import { useRouter, useRoute } from 'vue-router'
+import { onMounted, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { marked } from 'marked'
-import { tutorialApi, knowledgeApi, learnerApi } from '@/api'
+import { skillBlueprintApi, type SkillBlueprint, type ChapterContent, type TopicCard } from '@/api/skillBlueprint'
 
-const router         = useRouter()
-const route          = useRoute()
-const topicKey       = ref((route.query.topic as string) || '')
-const loading        = ref(false)
-const domainsLoading = ref(false)
-const tutorial       = ref<any>(null)
-const currentChapter = ref<any>(null)
-const domains        = ref<any[]>([])
-const progress       = ref<Record<string, any>>({})
+const route = useRoute()
+const router = useRouter()
 
-const renderedContent = computed(() => {
-  const text = currentChapter.value?.content_text || '（内容生成中，请稍后刷新页面）'
-  return marked(text)
-})
+const topics = ref<TopicCard[]>([])
+const blueprint = ref<SkillBlueprint | null>(null)
+const selectedTopic = ref<string>('')
+const activeChapterId = ref<string>('')
+const chapterContent = ref<ChapterContent | null>(null)
+const rebuilding = ref(false)
+const glossaryDrawer = ref(false)
 
-const completedCount = computed(() =>
-  Object.values(progress.value).filter((p: any) => p.completed).length
-)
-const progressPercent = computed(() => {
-  const total = tutorial.value?.chapter_tree?.length || 0
-  return total ? Math.round(completedCount.value / total * 100) : 0
-})
-
-const currentIndex = computed(() => {
-  if (!tutorial.value || !currentChapter.value) return -1
-  return tutorial.value.chapter_tree.findIndex(
-    (c: any) => c.chapter_id === currentChapter.value.chapter_id
-  )
-})
-const hasPrev = computed(() => currentIndex.value > 0)
-const hasNext = computed(() =>
-  currentIndex.value < (tutorial.value?.chapter_tree?.length || 0) - 1
-)
-
-async function loadDomains() {
-  domainsLoading.value = true
-  try {
-    const res: any = await knowledgeApi.getDomains()
-    domains.value = res.data?.domains || []
-  } finally { domainsLoading.value = false }
-}
-
-async function loadTutorial(forceRefresh = false) {
-  if (!topicKey.value) return
-  loading.value = true
-  try {
-    const res: any = await tutorialApi.getByTopic(topicKey.value, forceRefresh)
-    tutorial.value = res.data
-
-    const chapters = res.data?.chapter_tree || []
-    if (!chapters.length) {
-      currentChapter.value = null
-      progress.value = {}
-      if (forceRefresh) {
-        ElMessage.success('教程已按最新知识点刷新，当前领域暂无可学章节')
-      }
-      return
-    }
-
-    const keepCurrent = chapters.find((c: any) =>
-      c.chapter_id === currentChapter.value?.chapter_id ||
-      c.title === currentChapter.value?.title
-    )
-    await selectChapter(keepCurrent || chapters[0])
-    await loadProgress()
-
-    if (forceRefresh) {
-      ElMessage.success('已按最新知识点重建教程，章节会逐步生成内容')
-    }
-  } finally { loading.value = false }
-}
-
-async function refreshTutorial() {
-  await loadTutorial(true)
-}
-
-async function loadProgress() {
-  if (!tutorial.value?.tutorial_id) return
-  try {
-    const res: any = await learnerApi.getChapterProgress(tutorial.value.tutorial_id)
-    progress.value = res.data?.progress || {}
-  } catch {}
-}
-
-async function selectChapter(chapter: any) {
-  currentChapter.value = chapter
-}
-
-async function toggleComplete(chapter: any) {
-  if (!tutorial.value?.tutorial_id) return
-  const wasCompleted = progress.value[chapter.chapter_id]?.completed
-  await learnerApi.markChapter({
-    tutorial_id: tutorial.value.tutorial_id,
-    chapter_id:  chapter.chapter_id,
-    completed:   !wasCompleted,
-  })
-  progress.value[chapter.chapter_id] = { completed: !wasCompleted }
-  ElMessage.success(!wasCompleted ? '已标记完成 ✅' : '已取消完成标记')
-}
-
-function prevChapter() {
-  if (hasPrev.value)
-    currentChapter.value = tutorial.value.chapter_tree[currentIndex.value - 1]
-}
-function nextChapter() {
-  if (hasNext.value)
-    currentChapter.value = tutorial.value.chapter_tree[currentIndex.value + 1]
-}
-function goChat() {
-  router.push({ path: '/chat', query: { topic: topicKey.value } })
-}
-
-watch(
-  () => route.query.topic,
-  (nextTopic) => {
-    topicKey.value = (nextTopic as string) || ''
-    tutorial.value = null
-    currentChapter.value = null
-    progress.value = {}
-    if (topicKey.value) {
-      loadTutorial()
-    }
+async function loadTopics() {
+  topics.value = await skillBlueprintApi.listTopics()
+  const routeTopic = String(route.query.topic || '')
+  if (routeTopic) {
+    selectedTopic.value = routeTopic
+  } else if (!selectedTopic.value && topics.value.length > 0) {
+    selectedTopic.value = topics.value[0].topic_key
   }
-)
+}
 
-onMounted(() => {
-  loadDomains()
-  if (topicKey.value) loadTutorial()
+async function reloadTopic(force: boolean) {
+  if (!selectedTopic.value) return
+  rebuilding.value = force
+  try {
+    blueprint.value = force
+      ? await skillBlueprintApi.regenerateTopic(selectedTopic.value)
+      : await skillBlueprintApi.getTopic(selectedTopic.value, { force: false })
+
+    const firstChapter = blueprint.value.stages?.flatMap((stage) => stage.chapters || [])[0]
+    if (firstChapter) {
+      await selectChapter(firstChapter.chapter_id)
+    } else {
+      chapterContent.value = null
+      activeChapterId.value = ''
+    }
+
+    if (force) {
+      ElMessage.success('已按最新知识点重新生成技能教程')
+    }
+  } catch (error: any) {
+    ElMessage.error(error?.response?.data?.detail || '加载教程失败')
+  } finally {
+    rebuilding.value = false
+  }
+}
+
+async function selectChapter(chapterId: string) {
+  activeChapterId.value = chapterId
+  chapterContent.value = await skillBlueprintApi.getChapterContent(chapterId)
+}
+
+async function handleTopicChange() {
+  await router.replace({ query: { ...route.query, topic: selectedTopic.value } })
+  await reloadTopic(false)
+}
+
+onMounted(async () => {
+  await loadTopics()
+  if (selectedTopic.value) {
+    await reloadTopic(false)
+  }
 })
 </script>
 
 <style scoped>
-.page { padding: 8px; }
-.header-bar { display: flex; gap: 8px; align-items: center; }
-.chapter-list { height: calc(100vh - 120px); overflow-y: auto; }
-.chapter-item {
-  padding: 10px 12px; cursor: pointer; border-radius: 6px;
-  margin-bottom: 4px; display: flex; align-items: center; gap: 8px;
-  transition: background .15s;
+.tutorial-page {
+  padding: 16px;
 }
-.chapter-item:hover  { background: #f0f7ff; }
-.chapter-item.active { background: #ecf5ff; color: #409eff; }
-.chapter-item.done   { opacity: 0.7; }
-.chapter-icon { width: 24px; height: 24px; border-radius: 50%; background: #409eff;
-  color: #fff; font-size: 12px; display: flex; align-items: center;
-  justify-content: center; flex-shrink: 0; }
-.chapter-item.done .chapter-icon { background: #67c23a; }
-.chapter-title { flex: 1; font-size: 14px; }
-.content { line-height: 1.8; color: #303133; }
-.content :deep(h1),.content :deep(h2),.content :deep(h3) { margin: 16px 0 8px; }
-.content :deep(p)    { margin-bottom: 12px; }
-.content :deep(code) { background: #f5f5f5; padding: 2px 6px; border-radius: 3px; }
-.content :deep(pre)  { background: #282c34; color: #abb2bf; padding: 16px;
-  border-radius: 6px; overflow-x: auto; margin: 12px 0; }
+.toolbar {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.topic-select {
+  width: 320px;
+}
+.summary-card {
+  margin-bottom: 16px;
+}
+.summary-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.summary-text {
+  font-size: 16px;
+  font-weight: 600;
+}
+.summary-subtext {
+  margin-top: 8px;
+  color: #666;
+}
+.body {
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  gap: 16px;
+}
+.left {
+  border-right: 1px solid #eee;
+  padding-right: 12px;
+}
+.stage-block {
+  margin-bottom: 16px;
+}
+.stage-title {
+  font-size: 16px;
+  font-weight: 700;
+}
+.stage-objective {
+  color: #666;
+  margin: 6px 0 10px;
+  line-height: 1.5;
+}
+.chapter-btn {
+  width: 100%;
+  margin-bottom: 8px;
+  height: auto;
+  text-align: left;
+  justify-content: flex-start;
+  white-space: normal;
+}
+.chapter-btn-title {
+  font-weight: 600;
+}
+.chapter-btn-sub {
+  font-size: 12px;
+  opacity: 0.7;
+}
+.chapter-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+.chapter-title {
+  font-size: 20px;
+  font-weight: 700;
+}
+.chapter-objective {
+  color: #666;
+  margin-top: 6px;
+}
+.chapter-meta {
+  margin-bottom: 12px;
+}
+.section {
+  margin-top: 18px;
+}
+.section-body {
+  white-space: pre-wrap;
+  font-family: inherit;
+  background: #fafafa;
+  padding: 12px;
+  border-radius: 8px;
+}
+.glossary-card {
+  margin-bottom: 12px;
+}
+.glossary-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.glossary-short {
+  font-weight: 600;
+}
+.glossary-detail {
+  color: #555;
+  line-height: 1.6;
+}
+.empty-tip {
+  color: #888;
+  padding: 24px 8px;
+}
 </style>

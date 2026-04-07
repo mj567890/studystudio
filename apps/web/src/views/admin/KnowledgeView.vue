@@ -1,116 +1,78 @@
 <template>
-  <div class="page">
-    <el-card v-loading="loading">
-      <template #header>
-        <div class="toolbar">
-          <span>知识库管理</span>
-          <div class="toolbar-actions">
-            <el-input
-              v-model="newDomain"
-              size="small"
-              clearable
-              placeholder="输入新领域名，例如 web-security"
-              style="width: 240px"
-              @keyup.enter="createDomain"
-            />
-            <el-button size="small" type="primary" :loading="creating" @click="createDomain">
-              新建领域
-            </el-button>
-            <el-button size="small" @click="load">刷新</el-button>
-          </div>
-        </div>
-      </template>
+  <div class="knowledge-view">
+    <div class="toolbar">
+      <el-button type="primary" @click="loadTopics">刷新领域蓝图</el-button>
+    </div>
 
-      <el-table :data="domains" size="small">
-        <el-table-column prop="domain_tag" label="领域标签" />
-        <el-table-column prop="space_type" label="知识空间" width="100">
-          <template #default="{ row }">
-            <el-tag size="small" :type="row.space_type === 'global' ? 'success' : 'info'">
-              {{ row.space_type }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column prop="entity_count" label="知识点数量" width="120" />
-        <el-table-column prop="core_count" label="核心知识点" width="120" />
-        <el-table-column label="操作" width="200">
-          <template #default="{ row }">
-            <el-button size="small" @click="goLearn(row.domain_tag)">学习</el-button>
-            <el-button size="small" type="primary" @click="goReview(row.domain_tag)">
-              审核知识点
-            </el-button>
-          </template>
-        </el-table-column>
-      </el-table>
-    </el-card>
+    <el-table :data="topics" stripe>
+      <el-table-column prop="topic_key" label="领域" min-width="160" />
+      <el-table-column prop="chapter_count" label="教程章节数" width="120" />
+      <el-table-column prop="approved_entity_count" label="已审核术语数" width="120" />
+      <el-table-column prop="version" label="蓝图版本" width="100" />
+      <el-table-column prop="status" label="状态" width="100" />
+      <el-table-column label="技能目标" min-width="260">
+        <template #default="{ row }">
+          <div class="goal-cell">{{ row.skill_goal }}</div>
+        </template>
+      </el-table-column>
+      <el-table-column label="操作" width="260">
+        <template #default="{ row }">
+          <el-button size="small" @click="openTutorial(row.topic_key)">查看教程</el-button>
+          <el-button size="small" type="primary" :loading="busyTopic === row.topic_key" @click="rebuild(row.topic_key)">
+            重建蓝图
+          </el-button>
+        </template>
+      </el-table-column>
+    </el-table>
+
+    <el-empty v-if="!topics.length" description="还没有可用的技能蓝图" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
+import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { adminApi, knowledgeApi } from '@/api'
+import { ElMessage } from 'element-plus'
+import { skillBlueprintApi, type TopicCard } from '@/api/skillBlueprint'
 
 const router = useRouter()
-const loading = ref(false)
-const creating = ref(false)
-const domains = ref<any[]>([])
-const newDomain = ref('')
+const topics = ref<TopicCard[]>([])
+const busyTopic = ref('')
 
-async function load() {
-  loading.value = true
+async function loadTopics() {
+  topics.value = await skillBlueprintApi.listTopics()
+}
+
+function openTutorial(topicKey: string) {
+  router.push({ path: '/tutorial', query: { topic: topicKey } })
+}
+
+async function rebuild(topicKey: string) {
+  busyTopic.value = topicKey
   try {
-    const res: any = await knowledgeApi.getDomains()
-    domains.value = res.data?.domains || []
+    await skillBlueprintApi.regenerateTopic(topicKey)
+    ElMessage.success('蓝图已重建')
+    await loadTopics()
+  } catch (error: any) {
+    ElMessage.error(error?.response?.data?.detail || '蓝图重建失败')
   } finally {
-    loading.value = false
+    busyTopic.value = ''
   }
 }
 
-async function createDomain() {
-  const name = newDomain.value.trim()
-  if (!name) {
-    ElMessage.warning('请输入领域名')
-    return
-  }
-
-  creating.value = true
-  try {
-    await adminApi.createKnowledgeSpace({ name, space_type: 'global' })
-    ElMessage.success('领域已创建')
-    newDomain.value = ''
-    await load()
-  } finally {
-    creating.value = false
-  }
-}
-
-function goLearn(domain: string) {
-  router.push({ path: '/tutorial', query: { topic: domain } })
-}
-
-function goReview(domain: string) {
-  router.push('/admin/review')
-}
-
-onMounted(load)
+onMounted(async () => {
+  await loadTopics()
+})
 </script>
 
 <style scoped>
-.page {
-  padding: 8px;
+.knowledge-view {
+  padding: 16px;
 }
-
 .toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  margin-bottom: 16px;
 }
-
-.toolbar-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.goal-cell {
+  line-height: 1.5;
 }
 </style>
