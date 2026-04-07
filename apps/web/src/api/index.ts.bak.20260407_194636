@@ -83,10 +83,8 @@ export const knowledgeApi = {
 
 // ── Tutorial ──────────────────────────────────────────────────
 export const tutorialApi = {
-  getByTopic: (topicKey: string, forceRefresh = false) =>
-    http.get(`/tutorials/topic/${topicKey}`, {
-      params: { force_refresh: forceRefresh },
-    }),
+  getByTopic: (topicKey: string) =>
+    http.get(`/tutorials/topic/${topicKey}`),
 }
 
 // ── Teaching ──────────────────────────────────────────────────

@@ -411,38 +411,22 @@ class RepairPathService:
         mastered    = await mastery_svc.get_mastered_entities(user_id, threshold=0.7)
         mastered_ids = {m["entity_id"] for m in mastered}
 
-        # 2. 仅获取当前主题的已审核实体，避免学习路径与教程串题
+        # 2. 获取所有需要学习的实体
         entities_result = await self.db.execute(
             text("""
-                SELECT entity_id::text AS entity_id, canonical_name, domain_tag
+                SELECT entity_id, canonical_name, domain_tag
                 FROM knowledge_entities
                 WHERE review_status = 'approved'
-                  AND domain_tag = :topic_key
-                ORDER BY canonical_name
-            """),
-            {"topic_key": topic_key}
+                ORDER BY domain_tag
+            """)
         )
-        all_entities = [dict(r._mapping) for r in entities_result.fetchall()]
-        allowed_entity_ids = {e["entity_id"] for e in all_entities}
+        all_entities = [
+            {"entity_id": str(r.entity_id), "canonical_name": r.canonical_name,
+             "domain_tag": r.domain_tag}
+            for r in entities_result.fetchall()
+        ]
 
-        if not all_entities:
-            event_bus = get_event_bus()
-            await event_bus.publish("repair_path_generated", {
-                "user_id":      user_id,
-                "topic_key":    topic_key,
-                "step_count":   0,
-                "is_truncated": False,
-            })
-            return {
-                "user_id":             user_id,
-                "topic_key":           topic_key,
-                "required_entity_ids": [],
-                "path_steps":          [],
-                "is_truncated":        False,
-                "total_steps":         0,
-            }
-
-        # 3. 获取依赖关系，并限制在当前主题子图内
+        # 3. 获取依赖关系
         relations_result = await self.db.execute(
             text("""
                 SELECT source_entity_id::text, target_entity_id::text, relation_type
@@ -455,8 +439,6 @@ class RepairPathService:
              "target_entity_id": str(r.target_entity_id),
              "relation_type":    r.relation_type}
             for r in relations_result.fetchall()
-            if str(r.source_entity_id) in allowed_entity_ids
-            and str(r.target_entity_id) in allowed_entity_ids
         ]
 
         # 4. BFS 带剪枝的依赖回溯

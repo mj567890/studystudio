@@ -5,7 +5,7 @@ apps/api/modules/teaching/teaching_router.py (Block E)
 
 合并在一个文件中，生产时应拆分到各模块目录。
 """
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -189,15 +189,14 @@ tutorial_router = APIRouter(prefix="/api/tutorials", tags=["tutorial"])
 
 @tutorial_router.get("/topic/{topic_key}")
 async def get_tutorial(
-    topic_key:      str,
-    force_refresh:  bool = Query(False),
-    current_user:   dict = Depends(get_current_user),
-    db: AsyncSession     = Depends(get_db),
+    topic_key:    str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession   = Depends(get_db),
 ) -> dict:
     from sqlalchemy import text as _text
     svc = TutorialGenerationService(db)
     # 触发或复用教程生成
-    tutorial_id = await svc.generate(topic_key, current_user["user_id"], force_refresh=force_refresh)
+    tutorial_id = await svc.generate(topic_key, current_user["user_id"])
 
     # 查询骨架
     result = await db.execute(

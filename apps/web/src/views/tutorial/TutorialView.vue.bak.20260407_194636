@@ -5,18 +5,12 @@
       <el-col :span="7">
         <el-card class="chapter-list">
           <template #header>
-            <div class="header-bar">
-              <el-select v-model="topicKey" placeholder="选择主题" size="small"
-                filterable style="width:100%" :loading="domainsLoading"
-                @change="() => loadTutorial()">
-                <el-option v-for="d in domains" :key="d.domain_tag"
-                  :label="d.domain_tag" :value="d.domain_tag" />
-              </el-select>
-              <el-button size="small" :disabled="!topicKey" :loading="loading"
-                @click="refreshTutorial">
-                重新生成教程
-              </el-button>
-            </div>
+            <el-select v-model="topicKey" placeholder="选择主题" size="small"
+              filterable style="width:100%" :loading="domainsLoading"
+              @change="loadTutorial">
+              <el-option v-for="d in domains" :key="d.domain_tag"
+                :label="d.domain_tag" :value="d.domain_tag" />
+            </el-select>
           </template>
 
           <el-skeleton :rows="6" animated v-if="loading" />
@@ -60,8 +54,8 @@
               </el-button>
             </div>
 
-            <el-alert v-if="tutorial?.status !== 'approved' || !currentChapter?.content_text" type="warning"
-              title="内容正在按最新知识点生成，请稍后刷新" show-icon :closable="false"
+            <el-alert v-if="tutorial?.status === 'skeleton_ready'" type="warning"
+              title="内容正在生成中，请稍后刷新" show-icon :closable="false"
               style="margin-bottom:16px" />
 
             <div class="content" v-html="renderedContent" />
@@ -129,38 +123,17 @@ async function loadDomains() {
   } finally { domainsLoading.value = false }
 }
 
-async function loadTutorial(forceRefresh = false) {
+async function loadTutorial() {
   if (!topicKey.value) return
   loading.value = true
   try {
-    const res: any = await tutorialApi.getByTopic(topicKey.value, forceRefresh)
+    const res: any = await tutorialApi.getByTopic(topicKey.value)
     tutorial.value = res.data
-
-    const chapters = res.data?.chapter_tree || []
-    if (!chapters.length) {
-      currentChapter.value = null
-      progress.value = {}
-      if (forceRefresh) {
-        ElMessage.success('教程已按最新知识点刷新，当前领域暂无可学章节')
-      }
-      return
-    }
-
-    const keepCurrent = chapters.find((c: any) =>
-      c.chapter_id === currentChapter.value?.chapter_id ||
-      c.title === currentChapter.value?.title
-    )
-    await selectChapter(keepCurrent || chapters[0])
-    await loadProgress()
-
-    if (forceRefresh) {
-      ElMessage.success('已按最新知识点重建教程，章节会逐步生成内容')
+    if (res.data?.chapter_tree?.length) {
+      await selectChapter(res.data.chapter_tree[0])
+      await loadProgress()
     }
   } finally { loading.value = false }
-}
-
-async function refreshTutorial() {
-  await loadTutorial(true)
 }
 
 async function loadProgress() {
@@ -199,19 +172,6 @@ function goChat() {
   router.push({ path: '/chat', query: { topic: topicKey.value } })
 }
 
-watch(
-  () => route.query.topic,
-  (nextTopic) => {
-    topicKey.value = (nextTopic as string) || ''
-    tutorial.value = null
-    currentChapter.value = null
-    progress.value = {}
-    if (topicKey.value) {
-      loadTutorial()
-    }
-  }
-)
-
 onMounted(() => {
   loadDomains()
   if (topicKey.value) loadTutorial()
@@ -220,7 +180,6 @@ onMounted(() => {
 
 <style scoped>
 .page { padding: 8px; }
-.header-bar { display: flex; gap: 8px; align-items: center; }
 .chapter-list { height: calc(100vh - 120px); overflow-y: auto; }
 .chapter-item {
   padding: 10px 12px; cursor: pointer; border-radius: 6px;

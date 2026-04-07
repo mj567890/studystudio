@@ -190,11 +190,11 @@ class SkeletonRepository:
     async def get_approved_by_topic(self, topic_key: str) -> dict | None:
         result = await self.db.execute(
             text("""
-                SELECT skeleton_id::text, tutorial_id::text, topic_key, chapter_tree, status
+                SELECT skeleton_id::text, tutorial_id::text, topic_key, chapter_tree
                 FROM tutorial_skeletons
                 WHERE topic_key = :topic_key
                   AND status = 'approved'
-                ORDER BY created_at DESC
+                  AND jsonb_array_length(chapter_tree) > 0
                 LIMIT 1
             """),
             {"topic_key": topic_key}
@@ -207,15 +207,17 @@ class SkeletonRepository:
             "tutorial_id":  row.tutorial_id,
             "topic_key":    row.topic_key,
             "chapter_tree": row.chapter_tree,
-            "status":       row.status,
         }
 
+    # FIX-C：新增——查询任意状态（draft/approved）的骨架，
+    #         用于 generate() 兜底判断骨架是否正在生成中
     async def get_any_by_topic(self, topic_key: str) -> dict | None:
         result = await self.db.execute(
             text("""
                 SELECT skeleton_id::text, tutorial_id::text, topic_key, chapter_tree, status
                 FROM tutorial_skeletons
                 WHERE topic_key = :topic_key
+                  AND jsonb_array_length(chapter_tree) > 0
                 ORDER BY created_at DESC
                 LIMIT 1
             """),
@@ -263,50 +265,6 @@ class SkeletonRepository:
         await self.db.commit()
         return bool(row)
 
-    async def replace_topic_skeleton(self, skeleton: dict, status: str = 'draft') -> str:
-        params = {
-            "skeleton_id":  skeleton["skeleton_id"],
-            "tutorial_id":  skeleton["tutorial_id"],
-            "topic_key":    skeleton["topic_key"],
-            "chapter_tree": json.dumps(skeleton["chapter_tree"], ensure_ascii=False),
-            "status":       status,
-        }
-
-        result = await self.db.execute(
-            text("""
-                UPDATE tutorial_skeletons
-                SET skeleton_id = :skeleton_id,
-                    chapter_tree = CAST(:chapter_tree AS jsonb),
-                    status = :status
-                WHERE topic_key = :topic_key
-                RETURNING tutorial_id::text AS tutorial_id
-            """),
-            params,
-        )
-        row = result.fetchone()
-
-        tutorial_id = row.tutorial_id if row else skeleton["tutorial_id"]
-        if not row:
-            await self.db.execute(
-                text("""
-                    INSERT INTO tutorial_skeletons
-                      (skeleton_id, tutorial_id, topic_key, chapter_tree, status)
-                    VALUES
-                      (:skeleton_id, :tutorial_id, :topic_key, CAST(:chapter_tree AS jsonb), :status)
-                """),
-                params,
-            )
-
-        await self.db.commit()
-        return tutorial_id
-
-    async def clear_contents(self, tutorial_id: str) -> None:
-        await self.db.execute(
-            text("DELETE FROM tutorial_contents WHERE tutorial_id = :tid"),
-            {"tid": tutorial_id},
-        )
-        await self.db.commit()
-
     async def get(self, tutorial_id: str) -> dict | None:
         result = await self.db.execute(
             text("SELECT tutorial_id::text, topic_key, chapter_tree FROM tutorial_skeletons "
@@ -316,6 +274,7 @@ class SkeletonRepository:
         row = result.fetchone()
         return dict(row._mapping) if row else None
 
+    # FIX-A：新增——将骨架状态更新为 approved
     async def mark_approved(self, tutorial_id: str) -> None:
         await self.db.execute(
             text("""
@@ -344,63 +303,67 @@ class TutorialGenerationService:
         self.llm     = get_llm_gateway()
         self.quality = TutorialQualityEvaluator()
 
-    async def generate(self, topic_key: str, user_id: str, force_refresh: bool = False) -> str:
+    async def generate(self, topic_key: str, user_id: str) -> str:
         """
         入口：返回 tutorial_id。
-        - 正常情况复用已生成教程
-        - 知识点/依赖关系变化后自动重建
-        - force_refresh=True 时强制按最新知识图谱重建
+        B2：Redis 分布式锁防止并发重复骨架生成。
+        FIX-C：新增对 draft 骨架的兜底逻辑，防止骨架正在生成时重复触发。
         """
         import redis.asyncio as aioredis
         redis_client = aioredis.from_url(CONFIG.redis.url)
 
         lock_key = f"skeleton_lock:{topic_key}"
         lock_val = str(uuid.uuid4())
+
         acquired = await redis_client.set(lock_key, lock_val, nx=True, ex=30)
         tutorial_id = str(uuid.uuid4())
 
         try:
+            # 优先查 approved 骨架
             existing = await self.repo.get_approved_by_topic(topic_key)
             if existing:
                 tutorial_id = existing["tutorial_id"]
-                if force_refresh or await self._needs_rebuild(topic_key, existing.get("chapter_tree") or []):
-                    await self._refresh_existing_tutorial(topic_key, tutorial_id, user_id)
-                else:
-                    event_bus = get_event_bus()
-                    await event_bus.publish("skeleton_generated", {
-                        "tutorial_id":        tutorial_id,
-                        "topic_key":          topic_key,
-                        "requesting_user_id": user_id,
-                    })
-                return tutorial_id
-
-            draft = await self.repo.get_any_by_topic(topic_key)
-            if draft:
-                tutorial_id = draft["tutorial_id"]
-                if force_refresh:
-                    await self._refresh_existing_tutorial(topic_key, tutorial_id, user_id)
-                else:
+                event_bus = get_event_bus()
+                await event_bus.publish("skeleton_generated", {
+                    "tutorial_id":        tutorial_id,
+                    "topic_key":          topic_key,
+                    "requesting_user_id": user_id,
+                })
+            else:
+                # FIX-C：检查是否有 draft 骨架正在生成（内容填充尚未完成）
+                draft = await self.repo.get_any_by_topic(topic_key)
+                if draft:
+                    # 骨架已存在但内容还在填充中，直接复用 tutorial_id
+                    tutorial_id = draft["tutorial_id"]
                     logger.info(
                         "Skeleton in draft, reusing tutorial_id",
                         tutorial_id=tutorial_id,
                         topic_key=topic_key,
                     )
-                return tutorial_id
-
-            if acquired:
-                from apps.api.tasks.tutorial_tasks import generate_skeleton
-                generate_skeleton.delay(tutorial_id, topic_key, user_id)
-            return tutorial_id
+                elif acquired:
+                    # 全新主题，仅获锁者触发骨架生成 Celery 任务
+                    from apps.api.tasks.tutorial_tasks import generate_skeleton
+                    generate_skeleton.delay(tutorial_id, topic_key, user_id)
+                # 未获锁且无 draft：等待 skeleton_generated 事件
         finally:
             if acquired:
+                # B2：Lua 脚本原子释放，仅删除本进程持有的锁
                 await redis_client.eval(
                     "if redis.call('get',KEYS[1])==ARGV[1] then "
                     "return redis.call('del',KEYS[1]) else return 0 end",
                     1, lock_key, lock_val
                 )
-            await redis_client.aclose()
+        await redis_client.aclose()
+        return tutorial_id
 
-    async def _load_topic_graph(self, topic_key: str) -> tuple[list[dict], list[dict]]:
+    async def build_skeleton(
+        self, tutorial_id: str, topic_key: str, requesting_user_id: str
+    ) -> None:
+        """
+        骨架生成核心逻辑（由 Celery 同步任务包装调用）。
+        骨架是主题级通用资产，不传入 user_id，与任何用户无关。
+        """
+        # 获取知识子图（仅当前领域的已审核知识点）
         entities_result = await self.db.execute(
             text("""
                 SELECT entity_id::text, canonical_name, domain_tag
@@ -412,64 +375,29 @@ class TutorialGenerationService:
             {"topic_key": topic_key}
         )
         entities = [dict(r._mapping) for r in entities_result.fetchall()]
-        entity_ids = {e["entity_id"] for e in entities}
-        if not entity_ids:
-            return [], []
+
+        if not entities:
+            logger.warning(
+                "No approved entities for topic, skip skeleton build",
+                topic_key=topic_key,
+            )
+            return
 
         relations_result = await self.db.execute(
             text("""
                 SELECT source_entity_id::text, target_entity_id::text, relation_type
-                FROM knowledge_relations
-                WHERE relation_type = 'prerequisite_of'
+                FROM knowledge_relations WHERE relation_type = 'prerequisite_of'
             """)
         )
-        relations = [
-            dict(r._mapping)
-            for r in relations_result.fetchall()
-            if r.source_entity_id in entity_ids and r.target_entity_id in entity_ids
-        ]
-        return entities, relations
+        relations = [dict(r._mapping) for r in relations_result.fetchall()]
 
-    @staticmethod
-    def _graph_signature(entities: list[dict], relations: list[dict]) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
-        entity_pairs = {(e["entity_id"], e["canonical_name"]) for e in entities}
-        edge_pairs = {
-            (r["source_entity_id"], r["target_entity_id"])
-            for r in relations
-            if r.get("relation_type") == "prerequisite_of"
-        }
-        return entity_pairs, edge_pairs
-
-    @staticmethod
-    def _chapter_tree_signature(chapter_tree: list[dict]) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
-        entity_pairs: set[tuple[str, str]] = set()
-        edge_pairs: set[tuple[str, str]] = set()
-        for chapter in chapter_tree or []:
-            title = chapter.get("title", "")
-            target_ids = chapter.get("target_entity_ids", []) or []
-            prereq_ids = chapter.get("prerequisite_entity_ids", []) or []
-            for target_id in target_ids:
-                entity_pairs.add((target_id, title))
-                for source_id in prereq_ids:
-                    edge_pairs.add((source_id, target_id))
-        return entity_pairs, edge_pairs
-
-    async def _needs_rebuild(self, topic_key: str, chapter_tree: list[dict]) -> bool:
-        entities, relations = await self._load_topic_graph(topic_key)
-        current_entities, current_edges = self._graph_signature(entities, relations)
-        cached_entities, cached_edges = self._chapter_tree_signature(chapter_tree)
-        return current_entities != cached_entities or current_edges != cached_edges
-
-    def _build_chapter_tree(self, topic_key: str, entities: list[dict], relations: list[dict]) -> list[dict]:
-        if not entities:
-            logger.warning("No approved entities for topic", topic_key=topic_key)
-            return []
-
+        # B1：拓扑排序（统一 entity_id 字符串操作）
         sorted_entities, cycle_entities = topological_sort_safe(entities, relations)
         if cycle_entities:
             logger.warning("Cycle in knowledge graph", count=len(cycle_entities), topic_key=topic_key)
 
-        return [
+        # 构建章节树
+        chapter_tree = [
             {
                 "chapter_id":              str(uuid.uuid4()),
                 "title":                   entity["canonical_name"],
@@ -481,12 +409,6 @@ class TutorialGenerationService:
             for i, entity in enumerate(sorted_entities)
         ]
 
-    async def _refresh_existing_tutorial(
-        self, topic_key: str, tutorial_id: str, requesting_user_id: str
-    ) -> None:
-        entities, relations = await self._load_topic_graph(topic_key)
-        chapter_tree = self._build_chapter_tree(topic_key, entities, relations)
-
         skeleton = {
             "skeleton_id":  str(uuid.uuid4()),
             "tutorial_id":  tutorial_id,
@@ -494,62 +416,12 @@ class TutorialGenerationService:
             "chapter_tree": chapter_tree,
         }
 
-        status = 'draft' if chapter_tree else 'approved'
-        tutorial_id = await self.repo.replace_topic_skeleton(skeleton, status=status)
-        await self.repo.clear_contents(tutorial_id)
-
-        event_bus = get_event_bus()
-        if chapter_tree:
-            from apps.api.tasks.tutorial_tasks import generate_content
-            generate_content.delay(tutorial_id)
-
-        await event_bus.publish("skeleton_generated", {
-            "tutorial_id":        tutorial_id,
-            "topic_key":          topic_key,
-            "requesting_user_id": requesting_user_id,
-        })
-
-    async def build_skeleton(
-        self, tutorial_id: str, topic_key: str, requesting_user_id: str
-    ) -> None:
-        """
-        骨架生成核心逻辑（由 Celery 同步任务包装调用）。
-        骨架是主题级通用资产，不传入 user_id，与任何用户无关。
-        """
-        entities, relations = await self._load_topic_graph(topic_key)
-        chapter_tree = self._build_chapter_tree(topic_key, entities, relations)
-
-        if not chapter_tree:
-            logger.warning(
-                "No approved entities for topic, publish empty tutorial",
-                topic_key=topic_key,
-            )
-            skeleton = {
-                "skeleton_id":  str(uuid.uuid4()),
-                "tutorial_id":  tutorial_id,
-                "topic_key":    topic_key,
-                "chapter_tree": [],
-            }
-            await self.repo.replace_topic_skeleton(skeleton, status='approved')
-            event_bus = get_event_bus()
-            await event_bus.publish("skeleton_generated", {
-                "tutorial_id":        tutorial_id,
-                "topic_key":          topic_key,
-                "requesting_user_id": requesting_user_id,
-            })
-            return
-
-        skeleton = {
-            "skeleton_id":  str(uuid.uuid4()),
-            "tutorial_id":  tutorial_id,
-            "topic_key":    topic_key,
-            "chapter_tree": chapter_tree,
-        }
-
+        # D2：xmax=0 幂等写入
         saved = await self.repo.insert_if_not_exists(skeleton)
 
         event_bus = get_event_bus()
         if saved:
+            # 触发内容填充
             from apps.api.tasks.tutorial_tasks import generate_content
             generate_content.delay(tutorial_id)
 
@@ -559,7 +431,7 @@ class TutorialGenerationService:
                 "requesting_user_id": requesting_user_id,
             })
         else:
-            existing = await self.repo.get_any_by_topic(topic_key)
+            existing = await self.repo.get_approved_by_topic(topic_key)
             if existing:
                 await event_bus.publish("skeleton_generated", {
                     "tutorial_id":        existing["tutorial_id"],
