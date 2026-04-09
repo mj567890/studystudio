@@ -249,6 +249,31 @@ async def upload_file(
                 },
             }
 
+        # 检查该文件是否在其他 space 下已经处理过（跨 space 重复检测）
+        other_space_result = await db.execute(
+            text("""
+                SELECT d.document_id::text, ks.name AS space_name
+                FROM documents d
+                LEFT JOIN knowledge_spaces ks ON ks.space_id = d.space_id
+                WHERE d.file_id = CAST(:file_id AS uuid)
+                  AND d.document_status IN ('extracted', 'reviewed', 'published')
+                ORDER BY d.created_at DESC
+                LIMIT 1
+            """),
+            {"file_id": str(existing.file_id)}
+        )
+        other_doc = other_space_result.fetchone()
+        if other_doc:
+            # 文件在其他 space 已处理完成，提示用户但允许继续（前端可根据 already_in_space 提示）
+            logger.warning(
+                "File already processed in another space",
+                file_hash=file_hash,
+                existing_space=other_doc.space_name,
+                target_space=effective_space_id,
+            )
+            # 不阻止上传，但在响应里标记，前端可以提示用户
+            # 继续走正常上传流程，会触发新的 extraction
+
         await db.commit()
 
         minio_key = _extract_minio_key(existing.storage_url)
