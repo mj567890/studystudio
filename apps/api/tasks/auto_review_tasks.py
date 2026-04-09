@@ -116,7 +116,10 @@ async def _auto_review_async(space_id: str) -> None:
             else:
                 logger.warning("LLM returned unparseable result for batch", batch_start=i)
         except Exception as e:
-            logger.warning("Batch review failed, skipping", batch_start=i, error=str(e))
+            logger.warning("Batch review failed, will retry via re-trigger",
+                           batch_start=i, error=str(e))
+            # 超时时直接退出当前任务，下次触发会从 pending 里重新捞
+            break
 
     if not all_decisions:
         logger.warning("No decisions produced", space_id=space_id)
@@ -177,9 +180,9 @@ async def _auto_review_async(space_id: str) -> None:
                 auto_rejected=auto_rejected,
                 manual_pending=manual_count)
 
-    # 如果本批处理了实体，说明可能还有更多 pending，自动触发下一批
-    total_processed = auto_approved + auto_rejected + manual_count
-    if total_processed >= 80:
+    # 只有当本批有实际决策（approved 或 rejected）时才续批
+    # 纯 manual_pending 说明 AI 无法判断，不续批避免无限循环
+    if auto_approved + auto_rejected > 0:
         logger.info("More pending entities may exist, scheduling next batch",
                     space_id=space_id)
         from apps.api.tasks.auto_review_tasks import auto_review_entities

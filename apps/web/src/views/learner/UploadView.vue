@@ -175,6 +175,9 @@ const uploadAlertTitle = computed(() => {
     return `文件内容已存在，已复用原文件并重新投递到领域「${domain}」`
   }
   if (uploadResult.value.is_duplicate) {
+    if (uploadResult.value.already_in_space) {
+      return `该文件已在领域「${uploadResult.value.already_in_space}」中处理过，无需重复上传`
+    }
     if (uploadResult.value.reused_document || uploadResult.value.document_exists) {
       return `文件已存在于领域「${domain}」，无需重复处理`
     }
@@ -231,6 +234,8 @@ async function upload() {
 
     if (res.data?.is_duplicate && res.data?.requeued) {
       ElMessage.success(`已复用原文件并重新投递到领域「${res.data.domain_tag || domain}」`)
+    } else if (res.data?.is_duplicate && res.data?.already_in_space) {
+      ElMessage.warning(`该文件已在领域「${res.data.already_in_space}」中处理过，知识点已可用，无需重复上传`)
     } else if (res.data?.is_duplicate) {
       ElMessage.warning('文件已存在，系统已自动去重')
     } else {

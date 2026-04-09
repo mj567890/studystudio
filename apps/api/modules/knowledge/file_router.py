@@ -264,15 +264,28 @@ async def upload_file(
         )
         other_doc = other_space_result.fetchone()
         if other_doc:
-            # 文件在其他 space 已处理完成，提示用户但允许继续（前端可根据 already_in_space 提示）
+            # 文件在其他 space 已处理完成，阻止重复上传
+            await db.commit()
             logger.warning(
-                "File already processed in another space",
+                "File already processed in another space, blocking re-upload",
                 file_hash=file_hash,
                 existing_space=other_doc.space_name,
                 target_space=effective_space_id,
             )
-            # 不阻止上传，但在响应里标记，前端可以提示用户
-            # 继续走正常上传流程，会触发新的 extraction
+            return {
+                "code": 200,
+                "msg": "success",
+                "data": {
+                    "file_id": str(existing.file_id),
+                    "document_id": other_doc.document_id,
+                    "space_id": effective_space_id,
+                    "domain_tag": normalized_domain_tag,
+                    "is_duplicate": True,
+                    "reused_document": True,
+                    "requeued": False,
+                    "already_in_space": other_doc.space_name,
+                },
+            }
 
         await db.commit()
 
