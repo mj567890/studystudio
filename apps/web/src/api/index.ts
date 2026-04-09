@@ -20,8 +20,32 @@ http.interceptors.request.use(config => {
 http.interceptors.response.use(
   res => res.data,
   err => {
-    const status = err.response?.status
-    const msg = err.response?.data?.detail?.msg || err.message || '请求失败'
+    const status   = err.response?.status
+    const detail   = err.response?.data?.detail
+    const dataMsg  = err.response?.data?.msg
+
+    // 提取可读错误信息：兼容 {detail:{msg}} / {detail:"string"} / {msg} 三种格式
+    let msg: string
+    if (detail && typeof detail === 'object' && detail.msg) {
+      msg = detail.msg
+    } else if (typeof detail === 'string' && detail) {
+      msg = detail
+    } else if (dataMsg) {
+      msg = dataMsg
+    } else {
+      // 根据状态码给出中文提示，不暴露英文原始错误
+      const statusMessages: Record<number, string> = {
+        400: '请求参数有误，请检查后重试',
+        401: '登录已过期，请重新登录',
+        403: '权限不足，无法执行此操作',
+        404: '请求的资源不存在',
+        422: '提交的数据格式有误',
+        500: '服务器内部错误，请稍后重试',
+        502: '服务暂时不可用，请稍后重试',
+        503: '服务维护中，请稍后重试',
+      }
+      msg = statusMessages[status ?? 0] || '网络请求失败，请检查网络连接'
+    }
 
     if (status === 401) {
       localStorage.removeItem('access_token')
@@ -126,6 +150,14 @@ export const adminApi = {
   }) => http.post('/admin/entities/update', data),
   createKnowledgeSpace: (data: { name: string; space_type?: string; description?: string }) =>
     http.post('/admin/knowledge/spaces', data),
+
+  // AI 自动审核
+  triggerAutoReview: () =>
+    http.post('/admin/auto-review/trigger', {}),
+  getAutoReviewStatus: (spaceId: string) =>
+    http.get('/admin/auto-review/status', { params: { space_id: spaceId } }),
+  getAutoReviewSpaces: () =>
+    http.get('/admin/auto-review/spaces'),
 
   // 系统初始化与配置
   getInitStatus:    ()    => http.get('/admin/system/init-status'),

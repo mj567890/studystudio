@@ -5,41 +5,11 @@
         <div class="header-row">
           <span>知识点审核</span>
           <div class="header-actions">
-            <el-button size="small" @click="() => { load(); loadStats() }">刷新</el-button>
-            <el-button
-              size="small"
-              type="warning"
-              :loading="aiReviewing"
-              :disabled="aiReviewing"
-              @click="triggerAiReview"
-            >{{ aiReviewing ? 'AI 审核中...' : '🤖 AI 自动审核' }}</el-button>
+            <el-tag type="danger" v-if="activeTab === 'pending'">待审核 {{ entities.length }} 个</el-tag>
+            <el-tag type="success" v-else-if="activeTab === 'approved'">已通过 {{ entities.length }} 个</el-tag>
+            <el-tag v-else>已驳回 {{ entities.length }} 个</el-tag>
+            <el-button size="small" @click="load">刷新</el-button>
           </div>
-        </div>
-
-        <!-- 审核总览（数字来源统一为数据库统计） -->
-        <div v-if="reviewStats" class="review-overview">
-          <div class="stat-card stat-pending">
-            <div class="stat-num">{{ reviewStats.pending }}</div>
-            <div class="stat-label">待人工审核</div>
-          </div>
-          <div class="stat-card stat-ai">
-            <div class="stat-num">{{ reviewStats.ai_reviewed }}</div>
-            <div class="stat-label">AI 已标注（需确认）</div>
-          </div>
-          <div class="stat-card stat-approved">
-            <div class="stat-num">{{ reviewStats.approved }}</div>
-            <div class="stat-label">已通过</div>
-          </div>
-          <div class="stat-card stat-rejected">
-            <div class="stat-num">{{ reviewStats.rejected }}</div>
-            <div class="stat-label">已驳回</div>
-          </div>
-        </div>
-
-        <!-- AI 审核进行中提示 -->
-        <div v-if="aiReviewing" class="ai-running-tip">
-          <el-icon class="is-loading"><Loading /></el-icon>
-          AI 正在自动审核知识点，完成后列表将自动刷新...
         </div>
       </template>
 
@@ -107,21 +77,6 @@
         <el-table-column prop="short_definition" label="定义" min-width="260">
           <template #default="{ row }">
             <div class="ellipsis-two">{{ row.short_definition || '—' }}</div>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="AI 建议" width="140">
-          <template #default="{ row }">
-            <template v-if="row.ai_review_confidence != null">
-              <el-tag
-                size="small"
-                :type="row.ai_review_confidence >= 0.85 ? 'success' : row.ai_review_confidence >= 0.6 ? 'warning' : 'info'"
-              >
-                {{ (row.ai_review_confidence * 100).toFixed(0) }}%
-              </el-tag>
-              <div style="font-size:11px;color:#999;margin-top:2px;">{{ row.ai_review_reason }}</div>
-            </template>
-            <span v-else style="color:#ccc">—</span>
           </template>
         </el-table-column>
 
@@ -328,89 +283,11 @@ async function moveToPending(row: any) {
   }
 }
 
-onMounted(() => { load(); loadStats() })
-
-// ── AI 自动审核 ──────────────────────────────────────────────
-const aiReviewing = ref(false)
-const reviewStats = ref<any>(null)
-
-async function loadStats() {
-  try {
-    const res: any = await adminApi.getAutoReviewSpaces()
-    const spaces = res.data?.spaces || []
-    if (spaces.length > 0) {
-      // 汇总所有 space 的统计
-      reviewStats.value = spaces.reduce((acc: any, s: any) => ({
-        pending:     (acc.pending     || 0) + (s.pending     || 0),
-        approved:    (acc.approved    || 0) + (s.approved    || 0),
-        rejected:    (acc.rejected    || 0) + (s.rejected    || 0),
-        ai_reviewed: (acc.ai_reviewed || 0) + (s.ai_reviewed || 0),
-      }), {})
-    }
-  } catch {}
-}
-
-async function triggerAiReview() {
-  aiReviewing.value = true
-  try {
-    await adminApi.triggerAutoReview()
-    ElMessage.success("AI 自动审核已启动，正在处理中...")
-    // 每 8 秒轮询一次统计，最多等 3 分钟
-    let attempts = 0
-    const prevPending = reviewStats.value?.pending ?? 999
-    const poll = setInterval(async () => {
-      attempts++
-      await loadStats()
-      const nowPending = reviewStats.value?.pending ?? 999
-      // 待审核数量减少了，说明 AI 已处理了一批
-      if (nowPending < prevPending || attempts >= 22) {
-        clearInterval(poll)
-        aiReviewing.value = false
-        await load()
-        if (attempts < 22) {
-          ElMessage.success(`AI 审核完成！剩余 ${nowPending} 个需人工确认`)
-        } else {
-          ElMessage.warning("AI 审核仍在进行中，请稍后手动刷新")
-        }
-      }
-    }, 8000)
-  } catch {
-    ElMessage.error("触发失败，请检查网络后重试")
-    aiReviewing.value = false
-  }
-}
+onMounted(load)
 </script>
 
 <style scoped>
 .page { padding: 8px; }
-.review-overview {
-  display: flex;
-  gap: 12px;
-  margin-top: 12px;
-  flex-wrap: wrap;
-}
-.stat-card {
-  flex: 1;
-  min-width: 100px;
-  padding: 10px 14px;
-  border-radius: 6px;
-  text-align: center;
-  background: #f8f9fa;
-}
-.stat-card.stat-pending  { background: #fff7e6; border-left: 3px solid #fa8c16; }
-.stat-card.stat-ai       { background: #e6f4ff; border-left: 3px solid #1890ff; }
-.stat-card.stat-approved { background: #f6ffed; border-left: 3px solid #52c41a; }
-.stat-card.stat-rejected { background: #fff1f0; border-left: 3px solid #ff4d4f; }
-.stat-num   { font-size: 22px; font-weight: bold; line-height: 1.2; }
-.stat-label { font-size: 12px; color: #888; margin-top: 2px; }
-.ai-running-tip {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 10px;
-  color: #fa8c16;
-  font-size: 13px;
-}
 .header-row {
   display: flex;
   align-items: center;

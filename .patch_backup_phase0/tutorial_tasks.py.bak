@@ -45,9 +45,7 @@ celery_app.conf.update(
     # 不加这行时，knowledge_tasks 因从未被 import 而对 worker 不可见
     include = [
         "apps.api.tasks.tutorial_tasks",
-        "apps.api.tasks.blueprint_tasks",
         "apps.api.tasks.knowledge_tasks",
-        "apps.api.tasks.auto_review_tasks",
     ],
     task_routes = {
         "apps.api.tasks.tutorial_tasks.generate_skeleton":        {"queue": "tutorial"},
@@ -56,7 +54,6 @@ celery_app.conf.update(
         "apps.api.tasks.tutorial_tasks.prebuild_placement_bank":  {"queue": "low_priority"},
         "apps.api.tasks.knowledge_tasks.run_ingest":              {"queue": "knowledge"},
         "apps.api.tasks.knowledge_tasks.run_extraction":          {"queue": "knowledge"},
-        "apps.api.tasks.auto_review_tasks.auto_review_entities":  {"queue": "knowledge"},
     }
 )
 
@@ -90,8 +87,7 @@ async def _generate_skeleton_async(
 
     # FIX-2：Celery worker 绕过 FastAPI lifespan，需手动连接 EventBus
     event_bus = get_event_bus()
-    if event_bus._connection is None or event_bus._connection.is_closed:
-        await event_bus.connect()
+    await event_bus.connect()
     try:
         async with get_independent_db() as session:
             svc = TutorialGenerationService(session)

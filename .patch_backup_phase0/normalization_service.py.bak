@@ -135,7 +135,7 @@ class EntityNormalizationService:
                         INSERT INTO personal_entity_references
                           (id, user_id, ref_entity_id, source_doc_id, candidate_snapshot)
                         VALUES
-                          (:id, :user_id, :ref_id, :doc_id, CAST(:snapshot AS jsonb))
+                          (:id, :user_id, :ref_id, :doc_id, :snapshot::jsonb)
                         ON CONFLICT DO NOTHING
                     """),
                     {
@@ -215,7 +215,7 @@ class EntityNormalizationService:
                 WHERE space_type IN ('global','course')
                   AND domain_tag = :domain
                   AND review_status = 'approved'
-                ORDER BY embedding <=> CAST(:emb AS vector)
+                ORDER BY embedding <=> :emb::vector
                 LIMIT 5
             """),
             {"domain": domain_tag, "emb": str(embedding)}
@@ -233,7 +233,7 @@ class EntityNormalizationService:
                 WHERE space_type = :space
                   AND domain_tag = :domain
                   AND review_status = 'approved'
-                ORDER BY embedding <=> CAST(:emb AS vector)
+                ORDER BY embedding <=> :emb::vector
                 LIMIT 5
             """),
             {"space": space_type, "domain": domain_tag, "emb": str(embedding)}

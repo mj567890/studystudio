@@ -306,16 +306,6 @@ async def _run_extraction_async(
         # 实体和关系写入完成，由 _mark_document_extracted 统一 commit
         await _mark_document_extracted(session, document_id, success=True)
 
-        # 触发 AI 自动审核（extraction 完成后，对本 space 的 pending 实体自动分类）
-        if space_id:
-            try:
-                from apps.api.tasks.auto_review_tasks import auto_review_entities
-                auto_review_entities.apply_async(args=[space_id], queue="knowledge",
-                                                 countdown=5)
-                logger.info("auto_review_entities triggered", space_id=space_id)
-            except Exception as _e:
-                logger.warning("Failed to trigger auto_review", error=str(_e))
-
 
 # ════════════════════════════════════════════════════════════════
 # 四步管线子函数

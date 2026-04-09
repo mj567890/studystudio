@@ -195,32 +195,6 @@ async def get_tutorial(
     db: AsyncSession     = Depends(get_db),
 ) -> dict:
     from sqlalchemy import text as _text
-
-    # ── 新路径：优先读取已发布蓝图 ──
-    _bp = await db.execute(
-        _text("SELECT blueprint_id::text FROM skill_blueprints "
-              "WHERE topic_key = :tk AND status = 'published' LIMIT 1"),
-        {"tk": topic_key}
-    )
-    _bp_row = _bp.fetchone()
-    if _bp_row:
-        from apps.api.modules.skill_blueprint.service import BlueprintService
-        _bp_svc = BlueprintService(db)
-        _blueprint = await _bp_svc.get_blueprint(topic_key)
-        if _blueprint:
-            return {
-                "code": 200, "msg": "success",
-                "data": {
-                    "source":       "blueprint",
-                    "blueprint_id": _blueprint.blueprint_id,
-                    "topic_key":    _blueprint.topic_key,
-                    "title":        _blueprint.title,
-                    "skill_goal":   _blueprint.skill_goal,
-                    "stages":       [s.model_dump() for s in _blueprint.stages],
-                }
-            }
-
-    # ── 旧路径：无已发布蓝图时保持原有逻辑 ──
     svc = TutorialGenerationService(db)
     # 触发或复用教程生成
     tutorial_id = await svc.generate(topic_key, current_user["user_id"], force_refresh=force_refresh)

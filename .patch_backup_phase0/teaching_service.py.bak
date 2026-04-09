@@ -152,11 +152,11 @@ class RetrievalFusionService:
         result = await self.db.execute(
             text("""
                 SELECT entity_id::text, canonical_name, short_definition,
-                       1 - (embedding <=> CAST(:emb AS vector)) AS similarity
+                       1 - (embedding <=> :emb::vector) AS similarity
                 FROM knowledge_entities
                 WHERE review_status = 'approved'
                   AND embedding IS NOT NULL
-                ORDER BY embedding <=> CAST(:emb AS vector)
+                ORDER BY embedding <=> :emb::vector
                 LIMIT 30
             """),
             {"emb": str(query_emb)}
@@ -255,7 +255,7 @@ class DiagnosisWriteService:
         await self.db.execute(
             text("""
                 UPDATE learner_profiles
-                SET mastery_summary = mastery_summary || CAST(:update AS jsonb),
+                SET mastery_summary = mastery_summary || :update::jsonb,
                     version = version + 1,
                     updated_at = NOW()
                 WHERE user_id = :user_id AND version = :version
@@ -371,7 +371,7 @@ class TeachingChatService:
             text("""
                 INSERT INTO conversation_turns
                   (turn_id, conversation_id, role, content, gap_type, error_pattern, cited_entity_ids)
-                VALUES (:tid, :cid, 'assistant', :content, :gap_type, :error_pattern, CAST(:cited AS jsonb))
+                VALUES (:tid, :cid, 'assistant', :content, :gap_type, :error_pattern, :cited::jsonb)
             """),
             {
                 "tid":           turn_id,

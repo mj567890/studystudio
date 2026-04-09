@@ -54,7 +54,6 @@ services:
       dockerfile: docker/Dockerfile.api
     command: celery -A apps.api.tasks.tutorial_tasks.celery_app worker
              --loglevel=info --concurrency=4 --queues=tutorial,knowledge,low_priority
-             --without-heartbeat --without-mingle --without-gossip
     environment:
       - DATABASE_URL=postgresql+asyncpg://user:pass@postgres:5432/adaptive_learning
       - REDIS_URL=redis://redis:6379
@@ -68,12 +67,6 @@ services:
       - LLM_DEFAULT_MODEL=${LLM_DEFAULT_MODEL:-gpt-4o}
       - PYTHONPATH=/app
     depends_on: [api, rabbitmq, postgres]
-    healthcheck:
-      test: ["CMD-SHELL", "celery -A apps.api.tasks.tutorial_tasks.celery_app inspect ping --timeout 8 2>&1 | grep -q pong"]
-      interval: 30s
-      timeout: 15s
-      retries: 5
-      start_period: 60s
 
   celery_beat:
     build:
@@ -81,12 +74,6 @@ services:
       dockerfile: docker/Dockerfile.api
     command: celery -A apps.api.tasks.tutorial_tasks.celery_app beat --loglevel=info
     depends_on: [api, rabbitmq]
-    healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import os,sys; found=any(b'beat' in open('/proc/'+p+'/cmdline','rb').read() for p in os.listdir('/proc') if p.isdigit()); sys.exit(0 if found else 1)\"  "]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
 
   # ── 数据库 ────────────────────────────────────────────────────
   postgres:

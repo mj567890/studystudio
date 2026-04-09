@@ -40,7 +40,6 @@ from apps.api.modules.routers import (
     tutorial_router,
 )
 from apps.api.modules.admin.router import router as admin_router
-from apps.api.modules.skill_blueprint.router import router as blueprint_router
 
 logger = structlog.get_logger(__name__)
 
@@ -77,7 +76,6 @@ def create_app() -> FastAPI:
     app.include_router(tutorial_router)
     app.include_router(teaching_router)
     app.include_router(admin_router)
-    app.include_router(blueprint_router)
 
     @app.on_event("startup")
     async def startup() -> None:
@@ -166,28 +164,12 @@ def create_app() -> FastAPI:
                 topic_key=topic_key,
             )
             from apps.api.tasks.tutorial_tasks import generate_annotations
-            generate_annotations.apply_async(args=[tutorial_id, topic_key, user_id], queue="tutorial")
+            generate_annotations.delay(tutorial_id, topic_key, user_id)
 
         await event_bus.subscribe(
             event_name="skeleton_generated",
             queue_name="tutorial.annotations.queue",
             handler=on_skeleton_generated,
-        )
-
-        async def on_knowledge_extracted(envelope: dict) -> None:
-            payload   = envelope.get("payload", {})
-            space_id  = payload.get("space_id")
-            topic_key = payload.get("topic_key")
-            if not topic_key:
-                return
-            logger.info("knowledge_extracted → triggering blueprint synthesis", topic_key=topic_key)
-            from apps.api.tasks.blueprint_tasks import synthesize_blueprint
-            synthesize_blueprint.apply_async(args=[topic_key, space_id], queue="knowledge")
-
-        await event_bus.subscribe(
-            event_name="knowledge_extracted",
-            queue_name="blueprint.synthesis.queue",
-            handler=on_knowledge_extracted,
         )
 
         logger.info("Startup complete — event subscriptions active")

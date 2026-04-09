@@ -1,0 +1,257 @@
+"""
+apps/api/tasks/blueprint_tasks.py
+技能蓝图异步生成任务 — 三段式架构：读取 / LLM / 写入分离
+"""
+from __future__ import annotations
+import asyncio, json, re
+import structlog
+from apps.api.tasks.tutorial_tasks import celery_app
+
+logger = structlog.get_logger()
+
+SKILL_SIGNAL_PROMPT = """你是课程设计专家。分析以下知识点，提取核心技能信号。
+
+知识点：
+{entities_json}
+
+严格按 JSON 输出，不含其他内容：
+{{
+  "skill_goal": "学完后能做到什么（一句话）",
+  "typical_tasks": ["任务1", "任务2"],
+  "common_mistakes": ["误区1", "误区2"],
+  "assessment_criteria": ["标准1", "标准2"]
+}}"""
+
+BLUEPRINT_SYNTHESIS_PROMPT = """你是课程设计师。根据技能信号设计课程蓝图。
+
+技能信号：
+{skill_signal_json}
+
+严格要求：
+- 只输出 2 个阶段，每阶段 2 个章节，共 4 个章节
+- 章节标题必须是动词短语（如"识别SQL注入点"）
+- 阶段类型只选：foundation 或 practice
+- 每章 related_entities 最多 2 个
+- 输出合法 JSON，不含注释
+
+严格按 JSON 输出：
+{{
+  "title": "课程标题",
+  "stages": [
+    {{
+      "title": "阶段名",
+      "type": "foundation",
+      "chapters": [
+        {{
+          "title": "章节标题（动词短语）",
+          "objective": "学完能够...",
+          "task_description": "练习任务",
+          "pass_criteria": "通过标准",
+          "common_mistakes": "常见误区",
+          "related_entities": ["术语1"]
+        }}
+      ]
+    }}
+  ]
+}}"""
+
+CHAPTER_CONTENT_PROMPT = """为技能课程撰写章节正文（300-500字）。
+
+本章：{chapter_title}
+目标：{objective}
+任务：{task_description}
+
+遇到术语用【术语名】标注。只输出正文："""
+
+
+@celery_app.task(bind=True, max_retries=5, default_retry_delay=60)
+def synthesize_blueprint(self, topic_key: str, space_id):
+    logger.info("synthesize_blueprint start", topic_key=topic_key)
+    try:
+        asyncio.run(_synthesize_blueprint_async(topic_key, space_id))
+    except Exception as exc:
+        logger.error("synthesize_blueprint failed", error=str(exc), topic_key=topic_key)
+        raise self.retry(exc=exc)
+
+
+def _make_session():
+    """每次调用都创建全新引擎+会话，彻底避免连接池状态污染。"""
+    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+    from sqlalchemy.pool import NullPool
+    import os
+    _db_url = os.environ["DATABASE_URL"]
+    engine = create_async_engine(_db_url, poolclass=NullPool, echo=False)
+    return async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+
+async def _synthesize_blueprint_async(topic_key: str, space_id) -> None:
+    from apps.api.core.events import get_event_bus
+    from apps.api.core.llm_gateway import get_llm_gateway
+    from apps.api.modules.skill_blueprint.repository import BlueprintRepository
+    from sqlalchemy import text
+
+    event_bus = get_event_bus()
+    if event_bus._connection is None or event_bus._connection.is_closed:
+        await event_bus.connect()
+
+    llm = get_llm_gateway()
+    SessionFactory = _make_session()
+
+    # ══════════════════════════════════════════
+    # 第一段：读取数据（短会话，立即关闭）
+    # ══════════════════════════════════════════
+    async with SessionFactory() as session:
+        if not space_id:
+            row = await session.execute(
+                text("SELECT space_id::text FROM knowledge_spaces WHERE name=:n LIMIT 1"),
+                {"n": topic_key}
+            )
+            r = row.fetchone()
+            space_id = r[0] if r else None
+
+        if not space_id:
+            logger.warning("No space found for topic", topic_key=topic_key)
+            return
+
+        ents = await session.execute(
+            text("SELECT entity_id::text, canonical_name, entity_type, short_definition "
+                 "FROM knowledge_entities "
+                 "WHERE space_id = CAST(:sid AS uuid) AND review_status = 'approved' "
+                 "ORDER BY is_core DESC, canonical_name LIMIT 15"),
+            {"sid": space_id}
+        )
+        entities = [dict(r._mapping) for r in ents.fetchall()]
+
+        chunks = await session.execute(
+            text("SELECT dc.content FROM document_chunks dc "
+                 "JOIN documents d ON d.document_id = dc.document_id "
+                 "WHERE d.space_id = CAST(:sid AS uuid) AND d.document_status='extracted' "
+                 "ORDER BY dc.index_no LIMIT 5"),
+            {"sid": space_id}
+        )
+        text_excerpt = "\n".join(r.content for r in chunks.fetchall())[:800]
+    # ← 세션 자동 종료
+
+    if not entities:
+        logger.warning("No approved entities", topic_key=topic_key)
+        return
+
+    entity_name_to_id = {e["canonical_name"]: e["entity_id"] for e in entities}
+    entities_json = json.dumps(
+        [{"name": e["canonical_name"], "type": e["entity_type"]} for e in entities],
+        ensure_ascii=False
+    )
+
+    # ══════════════════════════════════════════
+    # 第二段：LLM 调用（不持有任何 DB 连接）
+    # ══════════════════════════════════════════
+    logger.info("Extracting skill signals", topic_key=topic_key)
+    signal_raw = await asyncio.wait_for(
+        llm.generate(SKILL_SIGNAL_PROMPT.format(entities_json=entities_json),
+                     model_route="knowledge_extraction"),
+        timeout=120
+    )
+    skill_signal = _parse_json(signal_raw)
+    if not skill_signal:
+        logger.error("skill_signal JSON parse failed", raw=signal_raw[:200])
+        return
+    skill_goal = skill_signal.get("skill_goal", f"{topic_key} 技能课程")
+
+    logger.info("Synthesizing blueprint", topic_key=topic_key)
+    blueprint_raw = await asyncio.wait_for(
+        llm.generate(BLUEPRINT_SYNTHESIS_PROMPT.format(
+            skill_signal_json=json.dumps(skill_signal, ensure_ascii=False)),
+            model_route="knowledge_extraction"),
+        timeout=120
+    )
+    blueprint_data = _parse_json(blueprint_raw)
+    if not blueprint_data or "stages" not in blueprint_data:
+        logger.error("blueprint JSON parse failed", raw=blueprint_raw[:200])
+        return
+
+    # 각 챕터의 내용을 미리 LLM 으로 생성 (DB 세션 없이)
+    chapter_contents: dict[str, str] = {}  # chapter title → content
+    for stage in blueprint_data["stages"]:
+        for ch in stage.get("chapters", []):
+            try:
+                content = await asyncio.wait_for(
+                    llm.generate(CHAPTER_CONTENT_PROMPT.format(
+                        chapter_title=ch.get("title",""),
+                        objective=ch.get("objective",""),
+                        task_description=ch.get("task_description","")),
+                        model_route="tutorial_content"),
+                    timeout=90
+                )
+                chapter_contents[ch["title"]] = content.strip()
+                logger.info("Chapter content generated", title=ch["title"])
+            except Exception as e:
+                logger.warning("Chapter content failed", title=ch.get("title"), error=str(e))
+                chapter_contents[ch["title"]] = ""
+
+    # ══════════════════════════════════════════
+    # 第三段：一次性写入（新会话，单一事务）
+    # ══════════════════════════════════════════
+    SessionFactory2 = _make_session()
+    async with SessionFactory2() as session:
+        async with session.begin():  # 자동 커밋/롤백
+            repo = BlueprintRepository(session)
+
+            blueprint_id = await repo.create_blueprint(
+                topic_key=topic_key,
+                title=blueprint_data.get("title", f"{topic_key} 技能课程"),
+                skill_goal=skill_goal,
+                space_id=space_id,
+            )
+            logger.info("Blueprint record created", blueprint_id=blueprint_id)
+
+            for stage_order, stage_data in enumerate(blueprint_data["stages"], start=1):
+                stage_type = stage_data.get("type", "foundation")
+                if stage_type not in ("foundation","process","case","practice","defense","assessment"):
+                    stage_type = "foundation"
+
+                stage_id = await repo.create_stage(
+                    blueprint_id=blueprint_id,
+                    title=stage_data.get("title", f"阶段{stage_order}"),
+                    description=None,
+                    stage_order=stage_order,
+                    stage_type=stage_type,
+                )
+
+                for ch_order, ch_data in enumerate(stage_data.get("chapters", []), start=1):
+                    chapter_id = await repo.create_chapter(
+                        stage_id=stage_id, blueprint_id=blueprint_id,
+                        title=ch_data.get("title", f"章节{ch_order}"),
+                        objective=ch_data.get("objective"),
+                        task_description=ch_data.get("task_description"),
+                        pass_criteria=ch_data.get("pass_criteria"),
+                        common_mistakes=ch_data.get("common_mistakes"),
+                        chapter_order=ch_order,
+                    )
+                    # 술어 연결
+                    for name in ch_data.get("related_entities", []):
+                        eid = entity_name_to_id.get(name)
+                        if eid:
+                            await repo.link_entity_to_chapter(chapter_id, eid, "core_term")
+                    # 미리 생성된 내용 저장
+                    ct = chapter_contents.get(ch_data.get("title",""), "")
+                    if ct:
+                        await repo.update_chapter_content(chapter_id, ct)
+
+                logger.info("Stage written", order=stage_order, title=stage_data.get("title"))
+
+            await repo.update_blueprint_status(blueprint_id, "review")
+        # ← session.begin() 컨텍스트 종료 시 자동 커밋
+
+    logger.info("Blueprint synthesis complete, status=review",
+                topic_key=topic_key, blueprint_id=blueprint_id)
+
+
+def _parse_json(raw: str):
+    clean = re.sub(r"```(?:json)?", "", raw).replace("```", "").strip()
+    m = re.search(r"\{.*\}", clean, re.DOTALL)
+    if not m:
+        return None
+    try:
+        return json.loads(m.group())
+    except json.JSONDecodeError:
+        return None
