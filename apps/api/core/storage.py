@@ -95,6 +95,20 @@ class AsyncMinIOClient:
             partial(self._client.delete_object, Bucket=self.bucket, Key=key)
         )
 
+    async def presign(self, key: str, expires: int = 3600) -> str:
+        """生成预签名 URL，默认有效期 1 小时。"""
+        loop = asyncio.get_event_loop()
+        url = await loop.run_in_executor(
+            None,
+            partial(
+                self._client.generate_presigned_url,
+                "get_object",
+                Params={"Bucket": self.bucket, "Key": key},
+                ExpiresIn=expires,
+            )
+        )
+        return url
+
     async def exists(self, key: str) -> bool:
         """检查文件是否存在。"""
         try:

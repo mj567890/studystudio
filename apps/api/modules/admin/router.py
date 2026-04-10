@@ -231,7 +231,12 @@ async def get_my_documents(
                        d.chunk_count, d.is_truncated, d.original_chunk_count,
                        d.space_type, d.space_id, d.created_at,
                        ks.name AS domain_tag,
-                       f.file_name, f.file_size, f.file_type
+                       f.file_name, f.file_size, f.file_type,
+                       (
+                           SELECT COUNT(*) FROM knowledge_entities ke
+                           WHERE ke.space_id = d.space_id
+                             AND ke.review_status IN ('approved', 'pending')
+                       ) AS entity_count
                 FROM documents d
                 LEFT JOIN files f ON d.file_id = f.file_id
                 LEFT JOIN knowledge_spaces ks ON ks.space_id::text = d.space_id::text
@@ -248,6 +253,8 @@ async def get_my_documents(
                 "status": row.document_status,
                 "chunk_count": row.chunk_count,
                 "is_truncated": row.is_truncated,
+                "original_chunk_count": row.original_chunk_count,
+                "entity_count": int(row.entity_count or 0),
                 "space_type": row.space_type,
                 "space_id": str(row.space_id) if row.space_id else None,
                 "domain_tag": row.domain_tag,

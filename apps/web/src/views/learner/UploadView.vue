@@ -77,6 +77,22 @@
             show-icon
             :closable="false"
           />
+          <el-alert
+            v-if="uploadResult && !uploadResult.is_duplicate"
+            style="margin-top:8px"
+            type="success"
+            :closable="false"
+            show-icon
+          >
+            <template #title>
+              下一步：前往「② 生成路径」，选择领域后生成你的学习路径
+              <el-button
+                type="primary" size="small" link
+                style="margin-left:8px"
+                @click="router.push('/path')"
+              >立即前往 →</el-button>
+            </template>
+          </el-alert>
         </el-card>
       </el-col>
 
@@ -89,14 +105,36 @@
             </el-button>
           </template>
 
+          <el-alert
+            style="margin-bottom:12px;font-size:12px"
+            :closable="false"
+            type="info"
+            show-icon
+          >
+            <template #title>
+              处理流程：排队中 → 解析中 → 审核中 → ✅ 完成，通常需要 1~5 分钟
+            </template>
+          </el-alert>
+
           <el-empty v-if="!docsLoading && !documents.length" description="暂无上传记录" />
 
           <div v-for="doc in documents" :key="doc.document_id" class="doc-item">
             <div class="doc-info">
               <span class="doc-name">{{ doc.title || doc.file_name }}</span>
-              <el-tag size="small" :type="statusType(doc.status)" style="margin-left:8px">
-                {{ statusLabel(doc.status) }}
-              </el-tag>
+              <span class="doc-actions">
+                <el-tag size="small" :type="statusType(doc.status)">
+                  {{ statusLabel(doc.status) }}
+                </el-tag>
+                <el-button link type="primary" size="small"
+                  @click="viewDoc(doc)">查看</el-button>
+                <el-button v-if="doc.status === 'failed'" link type="primary" size="small"
+                  @click="retryDoc(doc.document_id)">重试</el-button>
+                <el-popconfirm title="确认删除该文档及其知识点？" @confirm="deleteDoc(doc.document_id)">
+                  <template #reference>
+                    <el-button link type="danger" size="small">删除</el-button>
+                  </template>
+                </el-popconfirm>
+              </span>
             </div>
             <div class="doc-meta">
               <span>{{ doc.file_type?.toUpperCase() }}</span>
@@ -106,22 +144,56 @@
                 <span style="margin:0 6px">·</span>
                 <span>{{ doc.domain_tag }}</span>
               </template>
-              <span v-if="doc.chunk_count" style="margin:0 6px">·</span>
-              <span v-if="doc.chunk_count">{{ doc.chunk_count }} 个知识片段</span>
+              <template v-if="doc.chunk_count">
+                <span style="margin:0 6px">·</span>
+                <span>{{ doc.chunk_count }} 片段</span>
+              </template>
+              <template v-if="doc.entity_count">
+                <span style="margin:0 6px">·</span>
+                <span>{{ doc.entity_count }} 个知识点</span>
+              </template>
+              <el-tooltip v-if="doc.is_truncated" content="文件过大，仅处理了前 500 个片段" placement="top">
+                <el-tag size="small" type="warning" style="margin-left:6px">已截断</el-tag>
+              </el-tooltip>
             </div>
           </div>
         </el-card>
       </el-col>
     </el-row>
   </div>
+<!-- 文档阅读抽屉 -->
+<el-drawer v-model="drawerVisible" :title="drawerTitle" size="60%" direction="rtl">
+  <div v-if="drawerLoading" style="text-align:center;padding:40px">
+    <el-icon class="is-loading" style="font-size:32px"><Loading /></el-icon>
+    <p style="color:#909399;margin-top:12px">加载中…</p>
+  </div>
+  <div v-else-if="drawerMode === 'text'" style="padding:0 8px">
+    <pre v-if="drawerSuffix === 'txt'"
+      style="white-space:pre-wrap;font-size:13px;line-height:1.7;font-family:monospace">{{ drawerContent }}</pre>
+    <div v-else v-html="drawerHtml" style="line-height:1.8;font-size:14px" />
+  </div>
+  <div v-else-if="drawerMode === 'url'" style="text-align:center;padding:40px">
+    <p style="color:#606266;margin-bottom:20px">
+      {{ drawerSuffix === 'pdf' ? 'PDF 将在新标签页中打开' : '该格式将触发下载' }}
+    </p>
+    <el-button type="primary" @click="openUrl">打开文件</el-button>
+  </div>
+  <div v-else-if="drawerError" style="text-align:center;padding:40px;color:#f56c6c">
+    {{ drawerError }}
+  </div>
+</el-drawer>
+
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { marked } from 'marked'
 import { ElMessage } from 'element-plus'
 import { fileApi, knowledgeApi } from '@/api'
 import { useAuthStore } from '@/stores/auth'
+import { useRouter } from 'vue-router'
 
+const router = useRouter()
 const auth = useAuthStore()
 const authState = auth as any
 const canUseGlobal = computed(() => {
@@ -129,6 +201,15 @@ const canUseGlobal = computed(() => {
   return Boolean(authState.isAdmin || roles.includes('admin') || roles.includes('knowledge_reviewer'))
 })
 const uploading = ref(false)
+const drawerVisible = ref(false)
+const drawerLoading = ref(false)
+const drawerTitle   = ref('')
+const drawerMode    = ref('')
+const drawerSuffix  = ref('')
+const drawerContent = ref('')
+const drawerHtml    = ref('')
+const drawerUrl     = ref('')
+const drawerError   = ref('')
 const domainsLoading = ref(false)
 const docsLoading = ref(false)
 const fileList = ref<any[]>([])
@@ -142,18 +223,18 @@ const documents = ref<any[]>([])
 let timer: ReturnType<typeof setInterval>
 
 const STATUS_LABELS: Record<string, string> = {
-  uploaded: '待解析',
-  parsed: '解析中',
-  extracted: '抽取中',
-  reviewed: '待审核',
+  uploaded: '⏳ 排队中',
+  parsed: '⏳ 解析中',
+  extracted: '⏳ 审核中',
+  reviewed: '✅ 完成',
   published: '已完成',
   failed: '解析失败'
 }
 const STATUS_TYPES: Record<string, string> = {
   uploaded: 'info',
-  parsed: 'warning',
+  parsed: 'info',
   extracted: 'warning',
-  reviewed: '',
+  reviewed: 'success',
   published: 'success',
   failed: 'danger'
 }
@@ -246,6 +327,7 @@ async function upload() {
     selectedFile.value = null
     await loadDocs()
     await loadDomains()
+    scheduleNext()
   } finally {
     uploading.value = false
   }
@@ -284,13 +366,80 @@ async function loadDocs() {
   }
 }
 
+async function viewDoc(doc: any) {
+  drawerVisible.value = true
+  drawerLoading.value = true
+  drawerTitle.value   = doc.title || doc.file_name || '文档阅读'
+  drawerMode.value    = ''
+  drawerError.value   = ''
+  drawerContent.value = ''
+  drawerHtml.value    = ''
+  drawerUrl.value     = ''
+  try {
+    const res: any = await fileApi.viewDocument(doc.document_id)
+    const d = res.data
+    drawerMode.value   = d.mode
+    drawerSuffix.value = d.suffix || ''
+    if (d.mode === 'text') {
+      drawerContent.value = d.content
+      if (d.suffix === 'md') {
+        drawerHtml.value = marked.parse(d.content) as string
+      }
+      // PDF 直接打开
+    } else if (d.mode === 'url' && d.suffix === 'pdf') {
+      window.open(d.url, '_blank')
+      drawerVisible.value = false
+    } else {
+      drawerUrl.value = d.url
+    }
+  } catch {
+    drawerError.value = '加载失败，请稍后重试'
+  } finally {
+    drawerLoading.value = false
+  }
+}
+
+function openUrl() {
+  window.open(drawerUrl.value, '_blank')
+}
+
+async function retryDoc(docId: string) {
+  try {
+    await fileApi.retryDocument(docId)
+    ElMessage.success('已重新提交，请稍后刷新')
+    await loadDocs()
+  } catch {
+    ElMessage.error('重试失败')
+  }
+}
+
+async function deleteDoc(docId: string) {
+  try {
+    await fileApi.deleteDocument(docId)
+    ElMessage.success('删除成功')
+    await loadDocs()
+  } catch {
+    ElMessage.error('删除失败')
+  }
+}
+
+function scheduleNext() {
+  if (timer) clearTimeout(timer)
+  timer = setTimeout(async () => {
+    await loadDocs()
+    const pending = documents.value.some(
+      (d: any) => !['reviewed', 'failed'].includes(d.status)
+    )
+    if (pending) scheduleNext()
+  }, 5000)
+}
+
 onMounted(() => {
   loadDomains()
-  loadDocs()
-  timer = setInterval(loadDocs, 30000)
+  loadDocs().then(() => scheduleNext())
 })
 
-onUnmounted(() => clearInterval(timer))
+onUnmounted(() => clearTimeout(timer))
 </script>
 
 <style scoped>
@@ -327,10 +476,26 @@ onUnmounted(() => clearInterval(timer))
   border-bottom: none;
 }
 
+.doc-info {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.doc-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
 .doc-name {
   font-size: 14px;
   color: #303133;
   font-weight: 500;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-right: 8px;
 }
 
 .doc-meta {

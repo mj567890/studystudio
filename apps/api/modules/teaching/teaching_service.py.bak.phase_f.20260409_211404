@@ -93,19 +93,15 @@ class RetrievalFusionService:
         self.llm = get_llm_gateway()
 
     async def retrieve(
-        self, query: str, user_id: str, topic_key: str,
-        space_id:   str | None = None,
-        domain_tag: str | None = None,
-        chapter_id: str | None = None,
+        self, query: str, user_id: str, topic_key: str
     ) -> list[RankedKnowledgeItem]:
         """
         两路召回 + RRF 融合。
         返回最相关的 TOP_K 个知识点。
-        space_id / domain_tag / chapter_id 不为 None 时进行作用域过滤。
         """
         # 并行执行两路召回
-        bm25_results   = await self._bm25_search(query, space_id, domain_tag, chapter_id)
-        vector_results = await self._vector_search(query, space_id, domain_tag, chapter_id)
+        bm25_results   = await self._bm25_search(query)
+        vector_results = await self._vector_search(query)
 
         # RRF 融合
         scores: dict[str, float] = {}
@@ -132,72 +128,38 @@ class RetrievalFusionService:
             for eid in sorted_ids[:self.TOP_K]
         ]
 
-    async def _bm25_search(
-        self, query: str,
-        space_id:   str | None = None,
-        domain_tag: str | None = None,
-        chapter_id: str | None = None,
-    ) -> list[dict]:
-        chapter_join = (
-            "JOIN chapter_entity_links cel "
-            "ON cel.entity_id = ke.entity_id "
-            "AND cel.chapter_id = CAST(:chapter_id AS uuid)"
-            if chapter_id else ""
-        )
-        sql = f"""
-            SELECT ke.entity_id::text, ke.canonical_name, ke.short_definition,
-                   ts_rank(
-                     to_tsvector('simple', COALESCE(ke.canonical_name,'') || ' ' || COALESCE(ke.short_definition,'')),
-                     plainto_tsquery('simple', :query)
-                   ) AS score
-            FROM knowledge_entities ke
-            {chapter_join}
-            WHERE ke.review_status = 'approved'
-              AND (CAST(:space_id AS text) IS NULL OR ke.space_id = CAST(:space_id AS uuid) OR ke.space_type = 'global')
-              AND (CAST(:domain_tag AS text) IS NULL OR ke.domain_tag = :domain_tag)
-              AND to_tsvector('simple', COALESCE(ke.canonical_name,'') || ' ' || COALESCE(ke.short_definition,''))
-                  @@ plainto_tsquery('simple', :query)
-            ORDER BY score DESC
-            LIMIT 30
-        """
+    async def _bm25_search(self, query: str) -> list[dict]:
         result = await self.db.execute(
-            text(sql),
-            {"query": query, "space_id": space_id,
-             "domain_tag": domain_tag, "chapter_id": chapter_id}
+            text("""
+                SELECT entity_id::text, canonical_name, short_definition,
+                       ts_rank(
+                         to_tsvector('simple', COALESCE(canonical_name,'') || ' ' || COALESCE(short_definition,'')),
+                         plainto_tsquery('simple', :query)
+                       ) AS score
+                FROM knowledge_entities
+                WHERE review_status = 'approved'
+                  AND to_tsvector('simple', COALESCE(canonical_name,'') || ' ' || COALESCE(short_definition,''))
+                      @@ plainto_tsquery('simple', :query)
+                ORDER BY score DESC
+                LIMIT 30
+            """),
+            {"query": query}
         )
         return [dict(r._mapping) for r in result.fetchall()]
 
-    async def _vector_search(
-        self, query: str,
-        space_id:   str | None = None,
-        domain_tag: str | None = None,
-        chapter_id: str | None = None,
-    ) -> list[dict]:
+    async def _vector_search(self, query: str) -> list[dict]:
         query_emb = await self.llm.embed_single(query)
-        if not query_emb or len(query_emb) == 0:
-            return []
-        chapter_join = (
-            "JOIN chapter_entity_links cel "
-            "ON cel.entity_id = ke.entity_id "
-            "AND cel.chapter_id = CAST(:chapter_id AS uuid)"
-            if chapter_id else ""
-        )
-        sql = f"""
-            SELECT ke.entity_id::text, ke.canonical_name, ke.short_definition,
-                   1 - (ke.embedding <=> CAST(:emb AS vector)) AS similarity
-            FROM knowledge_entities ke
-            {chapter_join}
-            WHERE ke.review_status = 'approved'
-              AND ke.embedding IS NOT NULL
-              AND (CAST(:space_id AS text) IS NULL OR ke.space_id = CAST(:space_id AS uuid) OR ke.space_type = 'global')
-              AND (CAST(:domain_tag AS text) IS NULL OR ke.domain_tag = :domain_tag)
-            ORDER BY ke.embedding <=> CAST(:emb AS vector)
-            LIMIT 30
-        """
         result = await self.db.execute(
-            text(sql),
-            {"emb": str(query_emb), "space_id": space_id,
-             "domain_tag": domain_tag, "chapter_id": chapter_id}
+            text("""
+                SELECT entity_id::text, canonical_name, short_definition,
+                       1 - (embedding <=> CAST(:emb AS vector)) AS similarity
+                FROM knowledge_entities
+                WHERE review_status = 'approved'
+                  AND embedding IS NOT NULL
+                ORDER BY embedding <=> CAST(:emb AS vector)
+                LIMIT 30
+            """),
+            {"emb": str(query_emb)}
         )
         return [dict(r._mapping) for r in result.fetchall()]
 
@@ -233,7 +195,7 @@ class DiagnosisWriteService:
         version 冲突时合并：差值 < 0.1 取并集，否则取高 confidence 方。
         """
         result = await self.db.execute(
-            text("SELECT version, mastery_summary FROM learner_profiles WHERE user_id = :user_id"),
+            text("SELECT version, mastery_summary FROM learner_profiles WHERE user_id = :uid"),
             {"user_id": user_id}
         )
         row = result.fetchone()
@@ -327,9 +289,6 @@ class TeachingChatService:
         user_message:    str,
         topic_key:       str,
         user_id:         str,
-        space_id:        str | None = None,
-        domain_tag:      str | None = None,
-        chapter_id:      str | None = None,
     ) -> tuple[dict, DiagnosisUpdate, int]:
         """
         教学对话核心逻辑。
@@ -337,7 +296,7 @@ class TeachingChatService:
         """
         # 获取用户画像（含版本号，用于乐观锁）
         profile_result = await self.db.execute(
-            text("SELECT mastery_summary, version FROM learner_profiles WHERE user_id = :user_id"),
+            text("SELECT mastery_summary, version FROM learner_profiles WHERE user_id = :uid"),
             {"user_id": user_id}
         )
         profile_row  = profile_result.fetchone()
@@ -370,10 +329,7 @@ class TeachingChatService:
 
         # 检索相关知识点
         retrieval_svc = RetrievalFusionService(self.db)
-        retrieved = await retrieval_svc.retrieve(
-            user_message, user_id, topic_key,
-            space_id=space_id, domain_tag=domain_tag, chapter_id=chapter_id,
-        )
+        retrieved = await retrieval_svc.retrieve(user_message, user_id, topic_key)
 
         # LLM 教学调用（结构化输出，三级降级）
         system_prompt = TEACHING_SYSTEM_PROMPT.format(

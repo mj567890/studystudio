@@ -1,3 +1,194 @@
+#!/usr/bin/env python3
+"""
+阶段 F2：对话历史侧边栏补丁
+用法：python3 fix_chat_history.py
+"""
+from pathlib import Path
+
+BASE = Path.home() / "studystudio"
+
+
+def patch(path: Path, old: str, new: str, label: str) -> None:
+    txt = path.read_text(encoding="utf-8")
+    assert old in txt, f"❌ 未找到目标代码块：{label}\n路径：{path}"
+    count = txt.count(old)
+    assert count == 1, f"⚠️ 目标代码块出现 {count} 次（期望 1）：{label}"
+    path.write_text(txt.replace(old, new, 1), encoding="utf-8")
+    print(f"  ✅ {label}")
+
+
+# ══════════════════════════════════════════════════════════════
+# 1. routers.py — 新增历史列表 & 历史消息接口
+# ══════════════════════════════════════════════════════════════
+print("\n📄 routers.py")
+rp = BASE / "apps/api/modules/routers.py"
+
+OLD_CREATE = (
+    '@teaching_router.post("/conversations")\n'
+    'async def create_conversation(\n'
+    '    topic_key:    str,\n'
+    '    current_user: dict = Depends(get_current_user),\n'
+    '    db: AsyncSession   = Depends(get_db),\n'
+    ') -> dict:\n'
+    '    """创建新的对话会话。"""\n'
+    '    import uuid\n'
+    '    conv_id = str(uuid.uuid4())\n'
+    '    await db.execute(\n'
+    '        __import__("sqlalchemy").text("""\n'
+    '            INSERT INTO conversations (conversation_id, user_id, topic_key)\n'
+    '            VALUES (:cid, :uid, :tk)\n'
+    '        """),\n'
+    '        {"cid": conv_id, "uid": current_user["user_id"], "tk": topic_key}\n'
+    '    )\n'
+    '    await db.commit()\n'
+    '    return {"code": 201, "msg": "success", "data": {"conversation_id": conv_id}}'
+)
+
+NEW_CREATE = '''\
+@teaching_router.post("/conversations")
+async def create_conversation(
+    topic_key:    str,
+    title:        str = "",
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession   = Depends(get_db),
+) -> dict:
+    """创建新的对话会话。"""
+    import uuid
+    from sqlalchemy import text as _text
+    conv_id       = str(uuid.uuid4())
+    display_title = title or topic_key or "新对话"
+    await db.execute(
+        _text("""
+            INSERT INTO conversations (conversation_id, user_id, topic_key)
+            VALUES (:cid, :uid, :tk)
+        """),
+        {"cid": conv_id, "uid": current_user["user_id"], "tk": display_title}
+    )
+    await db.commit()
+    return {"code": 201, "msg": "success", "data": {
+        "conversation_id": conv_id, "title": display_title
+    }}
+
+
+@teaching_router.get("/conversations")
+async def list_conversations(
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession   = Depends(get_db),
+) -> dict:
+    """获取当前用户的对话列表（最近 50 条）。"""
+    from sqlalchemy import text as _text
+    result = await db.execute(
+        _text("""
+            SELECT conversation_id::text, topic_key, turn_count,
+                   created_at, updated_at
+            FROM conversations
+            WHERE user_id = CAST(:uid AS uuid)
+            ORDER BY updated_at DESC
+            LIMIT 50
+        """),
+        {"uid": current_user["user_id"]}
+    )
+    rows = result.fetchall()
+    convs = [
+        {
+            "conversation_id": r.conversation_id,
+            "title":      r.topic_key,
+            "turn_count": r.turn_count,
+            "created_at": r.created_at.isoformat() if r.created_at else "",
+            "updated_at": r.updated_at.isoformat() if r.updated_at else "",
+        }
+        for r in rows
+    ]
+    return {"code": 200, "msg": "success", "data": {"conversations": convs}}
+
+
+@teaching_router.get("/conversations/{conversation_id}/turns")
+async def get_conversation_turns(
+    conversation_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession   = Depends(get_db),
+) -> dict:
+    """获取指定对话的历史消息。"""
+    from sqlalchemy import text as _text
+    # 验证归属
+    conv = await db.execute(
+        _text("SELECT user_id FROM conversations WHERE conversation_id = CAST(:cid AS uuid)"),
+        {"cid": conversation_id}
+    )
+    row = conv.fetchone()
+    if not row or str(row.user_id) != current_user["user_id"]:
+        return {"code": 403, "msg": "forbidden", "data": {}}
+    result = await db.execute(
+        _text("""
+            SELECT role, content, gap_type, created_at
+            FROM conversation_turns
+            WHERE conversation_id = CAST(:cid AS uuid)
+            ORDER BY created_at ASC
+        """),
+        {"cid": conversation_id}
+    )
+    turns = [
+        {
+            "role":       r.role,
+            "content":    r.content,
+            "gap_type":   r.gap_type,
+            "created_at": r.created_at.isoformat() if r.created_at else "",
+        }
+        for r in result.fetchall()
+    ]
+    return {"code": 200, "msg": "success", "data": {"turns": turns}}'''
+
+patch(rp, OLD_CREATE, NEW_CREATE, "create_conversation + 新增 list/turns 接口")
+
+
+# ══════════════════════════════════════════════════════════════
+# 2. api/index.ts — 增加 listConversations / getTurns
+# ══════════════════════════════════════════════════════════════
+print("\n📄 api/index.ts")
+ap = BASE / "apps/web/src/api/index.ts"
+
+OLD_TEACHING_API = (
+    "export const teachingApi = {\n"
+    "  createConversation: (topicKey: string) =>\n"
+    "    http.post(`/teaching/conversations?topic_key=${topicKey}`),\n"
+    "  chat: (data: { conversation_id: string; message: string; context: any }) =>\n"
+    "    http.post('/teaching/chat', data),\n"
+    "  getSpaces: () =>\n"
+    "    http.get('/teaching/spaces'),\n"
+    "}"
+)
+
+NEW_TEACHING_API = (
+    "export const teachingApi = {\n"
+    "  createConversation: (topicKey: string, title?: string) =>\n"
+    "    http.post(`/teaching/conversations?topic_key=${encodeURIComponent(topicKey)}"
+    "&title=${encodeURIComponent(title || topicKey)}`),\n"
+    "  chat: (data: { conversation_id: string; message: string; context: any }) =>\n"
+    "    http.post('/teaching/chat', data),\n"
+    "  getSpaces: () =>\n"
+    "    http.get('/teaching/spaces'),\n"
+    "  listConversations: () =>\n"
+    "    http.get('/teaching/conversations'),\n"
+    "  getTurns: (conversationId: string) =>\n"
+    "    http.get(`/teaching/conversations/${conversationId}/turns`),\n"
+    "}"
+)
+
+patch(ap, OLD_TEACHING_API, NEW_TEACHING_API, "teachingApi 增加 listConversations/getTurns")
+
+
+# ══════════════════════════════════════════════════════════════
+# 3. ChatView.vue — 完整重写
+# ══════════════════════════════════════════════════════════════
+print("\n📄 ChatView.vue")
+cp = BASE / "apps/web/src/views/tutorial/ChatView.vue"
+# 备份
+bak = cp.with_name("ChatView.vue.bak.phase_f2")
+bak.write_text(cp.read_text(encoding="utf-8"), encoding="utf-8")
+print(f"  💾 备份 → {bak.name}")
+
+cp.write_text(
+    """\
 <template>
   <div class="chat-layout">
 
@@ -34,12 +225,7 @@
           @click="switchConversation(c)"
         >
           <div class="conv-title">{{ c.title || '未命名对话' }}</div>
-          <div class="conv-item-footer">
-          <span class="conv-meta">{{ c.turn_count }} 条 · {{ formatTime(c.updated_at) }}</span>
-          <el-button link type="danger" size="small"
-            @click.stop="deleteConversation(c.conversation_id)"
-            style="padding:0;height:16px;font-size:11px">删除</el-button>
-        </div>
+          <div class="conv-meta">{{ c.turn_count }} 条 · {{ formatTime(c.updated_at) }}</div>
         </div>
       </div>
     </div>
@@ -109,9 +295,9 @@
           v-model="inputText"
           type="textarea"
           :rows="3"
-          placeholder="输入问题…（Enter 发送，Shift+Enter 换行）"
+          placeholder="输入问题…（Ctrl+Enter 发送）"
           :disabled="thinking"
-          @keydown.enter.exact.prevent="send" @keydown.shift.enter.exact="newline"
+          @keydown.ctrl.enter="send"
           resize="none"
         />
         <el-button
@@ -304,26 +490,6 @@ async function send() {
   }
 }
 
-function newline(e: KeyboardEvent) {
-  const el = (e.target as HTMLTextAreaElement)
-  const pos = el.selectionStart ?? inputText.value.length
-  inputText.value = inputText.value.slice(0, pos) + "\n" + inputText.value.slice(pos)
-  nextTick(() => { el.selectionStart = el.selectionEnd = pos + 1 })
-}
-
-async function deleteConversation(cid: string) {
-  try {
-    await teachingApi.deleteConversation(cid)
-    conversations.value = conversations.value.filter(c => c.conversation_id !== cid)
-    if (conversationId.value === cid) {
-      conversationId.value = ""
-      messages.value = []
-    }
-  } catch {
-    //
-  }
-}
-
 async function sendMessage(text: string) {
   inputText.value = text
   await send()
@@ -396,12 +562,6 @@ onMounted(async () => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-.conv-item-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-top: 3px;
 }
 .conv-meta {
   font-size: 11px;
@@ -500,3 +660,18 @@ onMounted(async () => {
   background: #fff;
 }
 </style>
+""",
+    encoding="utf-8",
+)
+print("  ✅ ChatView.vue 完整重写")
+
+print("""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  F2 补丁完成 ✅
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+接下来执行：
+  source ~/studystudio/dev_tools.sh
+  rebuild_api
+  docker-compose up -d --no-deps --build web
+  wait_api
+""")

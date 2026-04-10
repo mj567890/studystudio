@@ -68,13 +68,6 @@ export const authApi = {
 }
 
 // ── Learner ───────────────────────────────────────────────────
-export const blueprintApi = {
-  getStatus: (topic: string) =>
-    http.get(`/blueprints/${topic}/status`),
-  generate: (topic: string, force = false) =>
-    http.post(`/blueprints/${topic}/generate`, { force_regen: force }),
-}
-
 export const learnerApi = {
   getProfile: () => http.get('/learners/me/profile'),
   getPlacementQuiz: (topicKey: string) =>
@@ -102,12 +95,6 @@ export const fileApi = {
       headers: { 'Content-Type': 'multipart/form-data' }
     })
   },
-  viewDocument: (docId: string) =>
-    http.get(`/files/documents/${docId}/view`),
-  retryDocument: (docId: string) =>
-    http.post(`/files/documents/${docId}/retry`),
-  deleteDocument: (docId: string) =>
-    http.delete(`/files/documents/${docId}`),
   getMyDocuments: () => http.get('/files/my-documents'),
 }
 
@@ -128,18 +115,10 @@ export const tutorialApi = {
 
 // ── Teaching ──────────────────────────────────────────────────
 export const teachingApi = {
-  createConversation: (topicKey: string, title?: string) =>
-    http.post(`/teaching/conversations?topic_key=${encodeURIComponent(topicKey)}&title=${encodeURIComponent(title || topicKey)}`),
+  createConversation: (topicKey: string) =>
+    http.post(`/teaching/conversations?topic_key=${topicKey}`),
   chat: (data: { conversation_id: string; message: string; context: any }) =>
     http.post('/teaching/chat', data),
-  getSpaces: () =>
-    http.get('/teaching/spaces'),
-  listConversations: () =>
-    http.get('/teaching/conversations'),
-  deleteConversation: (conversationId: string) =>
-    http.delete(`/teaching/conversations/${conversationId}`),
-  getTurns: (conversationId: string) =>
-    http.get(`/teaching/conversations/${conversationId}/turns`),
 }
 
 // ── Admin ─────────────────────────────────────────────────────

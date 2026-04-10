@@ -58,6 +58,21 @@ def run_ingest(
         logger.error("run_ingest failed", file_id=file_id, error=str(exc))
         raise self.retry(exc=exc)
 
+def _check_already_ingested(file_id: str) -> bool:
+    """同步检查 document 是否已存在且不是初始状态，避免重复处理。"""
+    import asyncio as _asyncio
+    async def _check():
+        from apps.api.core.db import get_independent_db
+        from sqlalchemy import text
+        async with get_independent_db() as db:
+            r = await db.execute(
+                text("SELECT document_status FROM documents WHERE file_id=CAST(:fid AS uuid) LIMIT 1"),
+                {"fid": file_id}
+            )
+            row = r.fetchone()
+            return row is not None and row.document_status not in ("uploaded",)
+    return _asyncio.run(_check())
+
 
 async def _run_ingest_async(
     file_id: str,
@@ -70,6 +85,18 @@ async def _run_ingest_async(
     from apps.api.core.db import get_independent_db, engine
     from apps.api.core.events import get_event_bus
     from apps.api.modules.knowledge.ingest_service import DocumentIngestService
+
+    # 幂等检查：document 已存在且不是初始状态，跳过重复处理
+    from sqlalchemy import text as _text
+    async with get_independent_db() as _db:
+        _r = await _db.execute(
+            _text("SELECT document_status FROM documents WHERE file_id=CAST(:fid AS uuid) LIMIT 1"),
+            {"fid": file_id}
+        )
+        _row = _r.fetchone()
+        if _row is not None and _row.document_status not in ("uploaded",):
+            logger.info("run_ingest skipped, already processed", file_id=file_id, status=_row.document_status)
+            return
 
     # 丢弃 fork 继承的旧连接句柄（与 run_extraction 同理）
     engine.sync_engine.dispose(close=False)
@@ -91,6 +118,30 @@ async def _run_ingest_async(
             owner_id=owner_id,
             file_name=file_name,
         )
+
+    # 确保 document_parsed 事件被发布（ingest_service 内部发布可能因连接问题失败）
+    if event_bus._connection is None or event_bus._connection.is_closed:
+        await event_bus.connect()
+    try:
+        from apps.api.core.db import get_independent_db as _gdb
+        from sqlalchemy import text as _text
+        async with _gdb() as _db:
+            r = await _db.execute(
+                _text("SELECT document_id::text, chunk_count, space_type, space_id FROM documents WHERE file_id=CAST(:fid AS uuid)"),
+                {"fid": file_id}
+            )
+            row = r.fetchone()
+            if row and row.document_id:
+                await event_bus.publish("document_parsed", {
+                    "document_id": row.document_id,
+                    "chunk_count": row.chunk_count or 0,
+                    "space_type":  row.space_type,
+                    "space_id":    str(row.space_id) if row.space_id else None,
+                    "is_truncated": False,
+                })
+                logger.info("document_parsed published from worker", document_id=row.document_id)
+    except Exception as e:
+        logger.error("Failed to publish document_parsed from worker", error=str(e))
 
 
 # ════════════════════════════════════════════════════════════════
@@ -248,6 +299,23 @@ async def _run_extraction_async(
             entity_name = entity.get("entity_name", "").strip()
             if not entity_name:
                 continue
+
+            # 过滤空内容知识点
+            definition = entity.get("short_definition", "").strip()
+            if not definition or definition in ("-", "—", "–"):
+                logger.debug("Entity skipped, empty definition", name=entity_name)
+                continue
+
+            # 去重：同领域已有同名知识点（无论通过还是驳回）则跳过，不重复插入
+            existing = await session.execute(
+                text("SELECT entity_id::text FROM knowledge_entities WHERE canonical_name=:n AND domain_tag=:d LIMIT 1"),
+                {"n": entity_name, "d": domain_tag}
+            )
+            existing_row = existing.fetchone()
+            if existing_row:
+                entity_name_to_id[entity_name] = existing_row[0]
+                continue
+
             entity_name_to_id[entity_name] = entity_id
             try:
                 async with session.begin_nested():
@@ -454,7 +522,7 @@ def _safe_parse_json(text: str) -> dict:
 
 async def _mark_document_extracted(session, document_id: str, success: bool) -> None:
     from sqlalchemy import text
-    status = "extracted" if success else "extract_failed"
+    status = "extracted" if success else "failed"
     await session.execute(
         text("UPDATE documents SET document_status = :status, updated_at = NOW() "
              "WHERE document_id = :doc_id"),

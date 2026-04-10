@@ -6,26 +6,30 @@
         <el-menu-item index="/">
           <el-icon><House /></el-icon>学习首页
         </el-menu-item>
-        <el-menu-item index="/profile">
-          <el-icon><UserFilled /></el-icon>学习画像
+        <el-divider style="margin:8px 0;border-color:#2d3f50" />
+        <div style="padding:4px 20px 2px;font-size:11px;color:#5a7a9a;letter-spacing:1px">学习流程</div>
+        <el-menu-item index="/upload">
+          <el-icon><Upload /></el-icon>① 上传资料
         </el-menu-item>
+        <el-menu-item index="/path">
+          <el-icon><Guide /></el-icon>② 生成路径
+        </el-menu-item>
+        <el-menu-item index="/tutorial">
+          <el-icon><Reading /></el-icon>③ 教程中心
+        </el-menu-item>
+        <el-menu-item index="/chat">
+          <el-icon><ChatDotRound /></el-icon>④ AI 对话
+        </el-menu-item>
+        <el-menu-item index="/gaps">
+          <el-icon><Warning /></el-icon>⑤ 知识漏洞
+        </el-menu-item>
+        <el-divider style="margin:8px 0;border-color:#2d3f50" />
+        <div style="padding:4px 20px 2px;font-size:11px;color:#5a7a9a;letter-spacing:1px">个人中心</div>
         <el-menu-item index="/quiz">
           <el-icon><EditPen /></el-icon>定位自检
         </el-menu-item>
-        <el-menu-item index="/gaps">
-          <el-icon><Warning /></el-icon>知识漏洞
-        </el-menu-item>
-        <el-menu-item index="/path">
-          <el-icon><Guide /></el-icon>学习路径
-        </el-menu-item>
-        <el-menu-item index="/tutorial">
-          <el-icon><Reading /></el-icon>教程中心
-        </el-menu-item>
-        <el-menu-item index="/chat">
-          <el-icon><ChatDotRound /></el-icon>AI 对话
-        </el-menu-item>
-        <el-menu-item index="/upload">
-          <el-icon><Upload /></el-icon>上传资料
+        <el-menu-item index="/profile">
+          <el-icon><UserFilled /></el-icon>学习画像
         </el-menu-item>
         <el-divider v-if="auth.isAdmin" style="margin:8px 0;border-color:#2d3f50" />
         <el-menu-item v-if="auth.isAdmin" index="/admin">
@@ -63,7 +67,7 @@ const titleMap: Record<string, string> = {
   '/profile':  '学习画像',
   '/quiz':     '定位自检',
   '/gaps':     '知识漏洞',
-  '/path':     '学习路径',
+  '/path':     '生成路径',
   '/tutorial': '教程中心',
   '/chat':     'AI 对话',
   '/upload':   '上传资料',

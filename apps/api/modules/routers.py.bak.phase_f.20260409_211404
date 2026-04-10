@@ -301,20 +301,14 @@ async def chat(
     D3+R1（V2.6）：chat_and_prepare 返回三元组，
     诊断写入通过 BackgroundTasks 后台执行，使用独立 session。
     """
-    svc        = TeachingChatService(db)
-    topic_key  = req.context.get("topic_key", "")
-    space_id   = req.context.get("space_id") or None
-    domain_tag = req.context.get("domain_tag") or None
-    chapter_id = req.context.get("chapter_id") or None
+    svc = TeachingChatService(db)
+    topic_key = req.context.get("topic_key", "")
 
     response, diagnosis, profile_version = await svc.chat_and_prepare(
         conversation_id = req.conversation_id,
         user_message    = req.message,
         topic_key       = topic_key,
         user_id         = current_user["user_id"],
-        space_id        = space_id,
-        domain_tag      = domain_tag,
-        chapter_id      = chapter_id,
     )
 
     # 不传 db：响应发送后 db session 已关闭，后台任务使用独立 session
@@ -331,148 +325,18 @@ async def chat(
 @teaching_router.post("/conversations")
 async def create_conversation(
     topic_key:    str,
-    title:        str = "",
     current_user: dict = Depends(get_current_user),
     db: AsyncSession   = Depends(get_db),
 ) -> dict:
     """创建新的对话会话。"""
     import uuid
-    from sqlalchemy import text as _text
-    conv_id       = str(uuid.uuid4())
-    display_title = title or topic_key or "新对话"
+    conv_id = str(uuid.uuid4())
     await db.execute(
-        _text("""
+        __import__("sqlalchemy").text("""
             INSERT INTO conversations (conversation_id, user_id, topic_key)
             VALUES (:cid, :uid, :tk)
         """),
-        {"cid": conv_id, "uid": current_user["user_id"], "tk": display_title}
+        {"cid": conv_id, "uid": current_user["user_id"], "tk": topic_key}
     )
     await db.commit()
-    return {"code": 201, "msg": "success", "data": {
-        "conversation_id": conv_id, "title": display_title
-    }}
-
-
-@teaching_router.get("/conversations")
-async def list_conversations(
-    current_user: dict = Depends(get_current_user),
-    db: AsyncSession   = Depends(get_db),
-) -> dict:
-    """获取当前用户的对话列表（最近 50 条）。"""
-    from sqlalchemy import text as _text
-    result = await db.execute(
-        _text("""
-            SELECT conversation_id::text, topic_key, turn_count,
-                   created_at, updated_at
-            FROM conversations
-            WHERE user_id = CAST(:uid AS uuid)
-            ORDER BY updated_at DESC
-            LIMIT 50
-        """),
-        {"uid": current_user["user_id"]}
-    )
-    rows = result.fetchall()
-    convs = [
-        {
-            "conversation_id": r.conversation_id,
-            "title":      r.topic_key,
-            "turn_count": r.turn_count,
-            "created_at": r.created_at.isoformat() if r.created_at else "",
-            "updated_at": r.updated_at.isoformat() if r.updated_at else "",
-        }
-        for r in rows
-    ]
-    return {"code": 200, "msg": "success", "data": {"conversations": convs}}
-
-
-@teaching_router.get("/conversations/{conversation_id}/turns")
-async def get_conversation_turns(
-    conversation_id: str,
-    current_user: dict = Depends(get_current_user),
-    db: AsyncSession   = Depends(get_db),
-) -> dict:
-    """获取指定对话的历史消息。"""
-    from sqlalchemy import text as _text
-    # 验证归属
-    conv = await db.execute(
-        _text("SELECT user_id FROM conversations WHERE conversation_id = CAST(:cid AS uuid)"),
-        {"cid": conversation_id}
-    )
-    row = conv.fetchone()
-    if not row or str(row.user_id) != current_user["user_id"]:
-        return {"code": 403, "msg": "forbidden", "data": {}}
-    result = await db.execute(
-        _text("""
-            SELECT role, content, gap_type, created_at
-            FROM conversation_turns
-            WHERE conversation_id = CAST(:cid AS uuid)
-            ORDER BY created_at ASC
-        """),
-        {"cid": conversation_id}
-    )
-    turns = [
-        {
-            "role":       r.role,
-            "content":    r.content,
-            "gap_type":   r.gap_type,
-            "created_at": r.created_at.isoformat() if r.created_at else "",
-        }
-        for r in result.fetchall()
-    ]
-    return {"code": 200, "msg": "success", "data": {"turns": turns}}
-
-
-@teaching_router.get("/spaces")
-async def list_teaching_spaces(
-    current_user: dict = Depends(get_current_user),
-    db: AsyncSession   = Depends(get_db),
-) -> dict:
-    """返回当前用户可用的知识空间（全局 + 本人个人空间）。"""
-    from sqlalchemy import text as _text
-    result = await db.execute(
-        _text("""
-            SELECT space_id::text, space_type,
-                   COALESCE(name,
-                     CASE space_type WHEN 'global' THEN '公共知识库' ELSE '我的知识库' END
-                   ) AS name
-            FROM knowledge_spaces
-            WHERE space_type = 'global'
-               OR (space_type = 'personal' AND owner_id = CAST(:uid AS uuid))
-            ORDER BY space_type DESC, name
-        """),
-        {"uid": current_user["user_id"]}
-    )
-    spaces = [
-        {"space_id": r.space_id, "space_type": r.space_type, "name": r.name}
-        for r in result.fetchall()
-    ]
-    return {"code": 200, "msg": "success", "data": {"spaces": spaces}}
-
-
-@teaching_router.delete("/conversations/{conversation_id}")
-async def delete_conversation(
-    conversation_id: str,
-    current_user: dict = Depends(get_current_user),
-    db: AsyncSession   = Depends(get_db),
-) -> dict:
-    """删除指定对话及其所有消息。"""
-    from sqlalchemy import text as _text
-    # 验证归属
-    conv = await db.execute(
-        _text("SELECT user_id FROM conversations WHERE conversation_id = CAST(:cid AS uuid)"),
-        {"cid": conversation_id}
-    )
-    row = conv.fetchone()
-    if not row or str(row.user_id) != current_user["user_id"]:
-        return {"code": 403, "msg": "forbidden", "data": {}}
-    # 先删消息，再删对话
-    await db.execute(
-        _text("DELETE FROM conversation_turns WHERE conversation_id = CAST(:cid AS uuid)"),
-        {"cid": conversation_id}
-    )
-    await db.execute(
-        _text("DELETE FROM conversations WHERE conversation_id = CAST(:cid AS uuid)"),
-        {"cid": conversation_id}
-    )
-    await db.commit()
-    return {"code": 200, "msg": "success", "data": {}}
+    return {"code": 201, "msg": "success", "data": {"conversation_id": conv_id}}

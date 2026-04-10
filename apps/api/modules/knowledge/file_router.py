@@ -38,7 +38,7 @@ MAX_SIZE_BYTES = int(100 * 1024 * 1024)  # 100MB
 def _normalize_domain_tag(domain_tag: str | None) -> str | None:
     if domain_tag is None:
         return None
-    normalized = " ".join(domain_tag.strip().split())
+    normalized = " ".join(domain_tag.strip().split()).lower()
     return normalized or None
 
 
@@ -249,44 +249,7 @@ async def upload_file(
                 },
             }
 
-        # 检查该文件是否在其他 space 下已经处理过（跨 space 重复检测）
-        other_space_result = await db.execute(
-            text("""
-                SELECT d.document_id::text, ks.name AS space_name
-                FROM documents d
-                LEFT JOIN knowledge_spaces ks ON ks.space_id = d.space_id
-                WHERE d.file_id = CAST(:file_id AS uuid)
-                  AND d.document_status IN ('extracted', 'reviewed', 'published')
-                ORDER BY d.created_at DESC
-                LIMIT 1
-            """),
-            {"file_id": str(existing.file_id)}
-        )
-        other_doc = other_space_result.fetchone()
-        if other_doc:
-            # 文件在其他 space 已处理完成，阻止重复上传
-            await db.commit()
-            logger.warning(
-                "File already processed in another space, blocking re-upload",
-                file_hash=file_hash,
-                existing_space=other_doc.space_name,
-                target_space=effective_space_id,
-            )
-            return {
-                "code": 200,
-                "msg": "success",
-                "data": {
-                    "file_id": str(existing.file_id),
-                    "document_id": other_doc.document_id,
-                    "space_id": effective_space_id,
-                    "domain_tag": normalized_domain_tag,
-                    "is_duplicate": True,
-                    "reused_document": True,
-                    "requeued": False,
-                    "already_in_space": other_doc.space_name,
-                },
-            }
-
+        # G-4: 跨 space 不阻止，允许在新领域重新处理同一文件
         await db.commit()
 
         minio_key = _extract_minio_key(existing.storage_url)
@@ -392,3 +355,151 @@ async def upload_file(
             "is_duplicate": False,
         },
     }
+
+
+@router.delete("/files/documents/{document_id}")
+async def delete_document(
+    document_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """删除文档及其所有关联数据（chunks、知识点链接、审核记录）。"""
+    # 验证归属
+    result = await db.execute(
+        text("SELECT owner_id, document_status FROM documents WHERE document_id = CAST(:did AS uuid)"),
+        {"did": document_id}
+    )
+    row = result.fetchone()
+    if not row:
+        return {"code": 404, "msg": "not found", "data": {}}
+    is_admin = "admin" in current_user.get("roles", [])
+    if str(row.owner_id) != current_user["user_id"] and not is_admin:
+        return {"code": 403, "msg": "forbidden", "data": {}}
+
+    # 删除关联数据
+    await db.execute(
+        text("DELETE FROM extract_audit WHERE chunk_id IN "
+             "(SELECT chunk_id FROM document_chunks WHERE document_id = CAST(:did AS uuid))"),
+        {"did": document_id}
+    )
+    await db.execute(
+        text("DELETE FROM document_chunks WHERE document_id = CAST(:did AS uuid)"),
+        {"did": document_id}
+    )
+    await db.execute(
+        text("DELETE FROM documents WHERE document_id = CAST(:did AS uuid)"),
+        {"did": document_id}
+    )
+    await db.commit()
+    return {"code": 200, "msg": "success", "data": {}}
+
+
+@router.post("/files/documents/{document_id}/retry")
+async def retry_document(
+    document_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """对失败文档重新触发解析流程。"""
+    result = await db.execute(
+        text("""
+            SELECT d.owner_id, d.document_status, d.space_type, d.space_id,
+                   f.file_name, f.storage_url,
+                   d.file_id::text AS file_id
+            FROM documents d
+            LEFT JOIN files f ON f.file_id = d.file_id
+            WHERE d.document_id = CAST(:did AS uuid)
+        """),
+        {"did": document_id}
+    )
+    row = result.fetchone()
+    if not row:
+        return {"code": 404, "msg": "not found", "data": {}}
+    if str(row.owner_id) != current_user["user_id"] and "admin" not in current_user.get("roles", []):
+        return {"code": 403, "msg": "forbidden", "data": {}}
+    if row.document_status not in ("failed", "extracted"):
+        return {"code": 400, "msg": "只有失败状态的文档可以重试", "data": {}}
+
+    # 重置状态
+    await db.execute(
+        text("UPDATE documents SET document_status='uploaded', updated_at=NOW() "
+             "WHERE document_id=CAST(:did AS uuid)"),
+        {"did": document_id}
+    )
+    await db.commit()
+
+    # 重新发布 file_uploaded 事件
+    from apps.api.core.storage import get_minio_client
+    minio_key = row.storage_url.split("/", 3)[-1] if row.storage_url else ""
+    event_bus = get_event_bus()
+    await event_bus.publish("file_uploaded", {
+        "file_id":    row.file_id,
+        "file_name":  row.file_name or "",
+        "minio_key":  minio_key,
+        "space_type": row.space_type,
+        "space_id":   str(row.space_id) if row.space_id else None,
+        "owner_id":   current_user["user_id"],
+    })
+
+    return {"code": 200, "msg": "success", "data": {}}
+
+
+@router.get("/files/documents/{document_id}/view")
+async def view_document(
+    document_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """
+    返回文档阅读信息：
+    - PDF / Word → 预签名 URL（前端新标签打开）
+    - Markdown / TXT → 纯文本内容（前端渲染）
+    """
+    result = await db.execute(
+        text("""
+            SELECT d.owner_id, f.storage_url, f.file_type, f.file_name
+            FROM documents d
+            LEFT JOIN files f ON f.file_id = d.file_id
+            WHERE d.document_id = CAST(:did AS uuid)
+        """),
+        {"did": document_id}
+    )
+    row = result.fetchone()
+    if not row:
+        return {"code": 404, "msg": "not found", "data": {}}
+    if str(row.owner_id) != current_user["user_id"] and "admin" not in current_user.get("roles", []):
+        return {"code": 403, "msg": "forbidden", "data": {}}
+
+    # storage_url 格式: http://minio:9000/{bucket}/{key}，去掉前三段得到 key
+    raw_key = row.storage_url.split("/", 3)[-1] if row.storage_url else ""
+    from apps.api.core.config import CONFIG
+    bucket_prefix = CONFIG.minio.bucket + "/"
+    minio_key = raw_key[len(bucket_prefix):] if raw_key.startswith(bucket_prefix) else raw_key
+    file_name = row.file_name or ""
+    suffix = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+
+    minio = get_minio_client()
+
+    # Markdown / TXT → 返回文本内容
+    if suffix in ("md", "txt"):
+        content_bytes = await minio.download_bytes(minio_key)
+        import chardet
+        enc = chardet.detect(content_bytes).get("encoding") or "utf-8"
+        content = content_bytes.decode(enc, errors="replace")
+        return {"code": 200, "msg": "success", "data": {
+            "mode": "text",
+            "file_name": file_name,
+            "suffix": suffix,
+            "content": content,
+        }}
+
+    # PDF / Word / 其他 → 预签名 URL
+    presign_url = await minio.presign(minio_key, expires=3600)
+    # 把 Docker 内网地址替换为外部可访问地址
+    presign_url = presign_url.replace('http://minio:9000', 'http://10.10.50.14:9000')
+    return {"code": 200, "msg": "success", "data": {
+        "mode": "url",
+        "file_name": file_name,
+        "suffix": suffix,
+        "url": presign_url,
+    }}

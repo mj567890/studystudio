@@ -271,7 +271,7 @@ class GapScanService:
                 WHERE ke.review_status = 'approved'
                 ORDER BY ke.domain_tag, mastery_score ASC
             """),
-            {"user_id": user_id}
+            {"uid": user_id}
         )
         rows = result.fetchall()
 

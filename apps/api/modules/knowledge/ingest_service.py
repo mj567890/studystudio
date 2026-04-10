@@ -173,15 +173,29 @@ class DocumentIngestService:
         )
         await self.db.commit()
 
-        # 发布 document_parsed 事件
+        # 发布 document_parsed 事件（加重连保护）
         event_bus = get_event_bus()
-        await event_bus.publish("document_parsed", {
+        _payload = {
             "document_id": document_id,
             "chunk_count": len(chunks_text),
             "space_type":  space_type,
             "space_id":    space_id,
             "is_truncated": is_truncated,
-        })
+        }
+        for _attempt in range(3):
+            try:
+                if event_bus._connection is None or event_bus._connection.is_closed:
+                    await event_bus.connect()
+                await event_bus.publish("document_parsed", _payload)
+                break
+            except Exception as _e:
+                logger.warning("document_parsed publish failed, retrying",
+                               attempt=_attempt + 1, error=str(_e))
+                import asyncio as _asyncio
+                await _asyncio.sleep(2)
+        else:
+            logger.error("document_parsed publish failed after 3 attempts",
+                         document_id=document_id)
 
         logger.info(
             "Document ingested",
