@@ -7,7 +7,8 @@
           <el-select v-model="topicKey" placeholder="选择主题" size="small"
             style="width:200px" :loading="domainsLoading">
             <el-option v-for="d in domains" :key="d.domain_tag"
-              :label="d.domain_tag" :value="d.domain_tag" />
+              :label="`${d.domain_tag}（${d.space_type === 'global' ? '全局' : '私有'}）`"
+              :value="d.domain_tag" />
           </el-select>
           <el-button type="primary" size="small" :loading="loading" @click="load">查询</el-button>
         </div>

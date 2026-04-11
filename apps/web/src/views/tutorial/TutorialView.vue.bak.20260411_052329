@@ -10,8 +10,7 @@
                 filterable style="width:100%" :loading="domainsLoading"
                 @change="() => loadTutorial()">
                 <el-option v-for="d in domains" :key="d.domain_tag"
-                  :label="`${d.domain_tag}（${d.space_type === 'global' ? '全局' : '私有'}）`"
-                  :value="d.domain_tag" />
+                  :label="d.domain_tag" :value="d.domain_tag" />
               </el-select>
               <el-button size="small" :disabled="!topicKey" :loading="loading"
                 @click="refreshTutorial">
@@ -25,7 +24,7 @@
             <!-- 进度条 -->
             <div style="margin-bottom:12px">
               <p style="font-size:12px;color:#909399;margin-bottom:4px">
-                已读进度 {{ completedCount }}/{{ tutorial.chapter_tree?.length || 0 }}
+                学习进度 {{ completedCount }}/{{ tutorial.chapter_tree?.length || 0 }}
               </p>
               <el-progress
                 :percentage="progressPercent"
@@ -36,13 +35,10 @@
             <div v-for="chapter in tutorial.chapter_tree" :key="chapter.chapter_id"
               class="chapter-item"
               :class="{ active: currentChapter?.chapter_id === chapter.chapter_id,
-                        done: progress[chapter.chapter_id]?.status === 'read',
-                        skipped: progress[chapter.chapter_id]?.status === 'skipped' }"
+                        done: progress[chapter.chapter_id]?.completed }"
               @click="selectChapter(chapter)">
               <span class="chapter-icon">
-                {{ progress[chapter.chapter_id]?.status === 'read' ? '👁' :
-                   progress[chapter.chapter_id]?.status === 'skipped' ? '⏭' :
-                   chapter.order_no }}
+                {{ progress[chapter.chapter_id]?.completed ? '✅' : chapter.order_no }}
               </span>
               <span class="chapter-title">{{ chapter.title }}</span>
             </div>
@@ -58,14 +54,9 @@
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
               <h2 style="margin:0">{{ currentChapter.title }}</h2>
               <el-button
-                :type="progress[currentChapter.chapter_id]?.status === 'read' ? 'success' : 'default'"
-                @click="markChapter(currentChapter, 'read')">
-                {{ progress[currentChapter.chapter_id]?.status === 'read' ? '👁 已读' : '标记已读' }}
-              </el-button>
-              <el-button
-                :type="progress[currentChapter.chapter_id]?.status === 'skipped' ? 'warning' : 'default'"
-                @click="markChapter(currentChapter, 'skipped')">
-                {{ progress[currentChapter.chapter_id]?.status === 'skipped' ? '⏭ 已忽略' : '忽略' }}
+                :type="progress[currentChapter.chapter_id]?.completed ? 'success' : 'primary'"
+                @click="toggleComplete(currentChapter)">
+                {{ progress[currentChapter.chapter_id]?.completed ? '✅ 已完成' : '标记完成' }}
               </el-button>
             </div>
 
@@ -79,7 +70,6 @@
                         display:flex;justify-content:space-between">
               <el-button @click="prevChapter" :disabled="!hasPrev">← 上一章</el-button>
               <el-button type="primary" @click="goChat">向 AI 提问本章内容</el-button>
-              <el-button type="warning" @click="startQuiz(currentChapter)">📝 开始测验</el-button>
               <el-button @click="nextChapter" :disabled="!hasNext">下一章 →</el-button>
             </div>
           </div>
@@ -88,73 +78,6 @@
       </el-col>
     </el-row>
   </div>
-  <!-- 测验弹窗 -->
-  <el-dialog v-model="quizVisible" title="章节测验" width="680px" :close-on-click-modal="false">
-    <div v-if="quizLoading" style="text-align:center;padding:40px">
-      <el-icon class="is-loading" style="font-size:32px;color:#409eff"><Loading /></el-icon>
-      <p style="margin-top:12px;color:#606266">正在生成题目，请稍候…</p>
-    </div>
-
-    <div v-else-if="quizSubmitted">
-      <el-result
-        :icon="quizScore >= 60 ? 'success' : 'warning'"
-        :title="`得分 ${quizScore} 分`"
-        :sub-title="`答对 ${quizCorrect}/${quizTotal} 题，掌握度已更新`">
-        <template #extra>
-          <el-button type="primary" @click="quizVisible = false">关闭</el-button>
-          <el-button @click="retryQuiz">重新测验（同一套题）</el-button>
-          <el-button type="success" @click="retryQuiz">换一套题</el-button>
-        </template>
-      </el-result>
-    </div>
-
-    <div v-else>
-      <div v-for="(q, idx) in quizQuestions" :key="q.question_id"
-        style="margin-bottom:24px;padding-bottom:20px;border-bottom:1px solid #eee">
-        <p style="font-weight:600;margin-bottom:10px">
-          {{ idx + 1 }}. 【{{ q.type === 'single_choice' ? '单选' : q.type === 'true_false' ? '判断' : '简答' }}】
-          {{ q.question }}
-        </p>
-
-        <!-- 单选题 -->
-        <el-radio-group v-if="q.type === 'single_choice'" v-model="userAnswers[q.question_id]">
-          <div v-for="(opt, key) in q.options" :key="key" style="margin-bottom:6px">
-            <el-radio :label="key">{{ key }}. {{ opt }}</el-radio>
-          </div>
-        </el-radio-group>
-
-        <!-- 判断题 -->
-        <el-radio-group v-else-if="q.type === 'true_false'" v-model="userAnswers[q.question_id]">
-          <el-radio :label="true">正确</el-radio>
-          <el-radio :label="false">错误</el-radio>
-        </el-radio-group>
-
-        <!-- 简答/填空题 -->
-        <div v-else>
-          <el-input v-model="userAnswers[q.question_id]" type="textarea" :rows="3"
-            placeholder="请输入你的答案" style="margin-bottom:8px" />
-          <p style="color:#909399;font-size:12px">参考答案：{{ q.answer }}</p>
-          <div style="margin-top:6px">
-            <span style="font-size:13px;margin-right:8px">自评：</span>
-            <el-radio-group v-model="selfEval[q.question_id]">
-              <el-radio :label="true">答对了</el-radio>
-              <el-radio :label="false">答错了</el-radio>
-            </el-radio-group>
-          </div>
-        </div>
-
-        <!-- 答题后显示解析 -->
-        <el-alert v-if="showExplanation && q.explanation" type="info" :closable="false"
-          style="margin-top:8px" :title="`解析：${q.explanation}`" />
-      </div>
-
-      <div style="text-align:right;margin-top:8px">
-        <el-button @click="pickQuestions">重新抽题</el-button>
-        <el-button type="primary" :loading="submitting" @click="submitQuiz">提交答案</el-button>
-      </div>
-    </div>
-  </el-dialog>
-
 </template>
 
 <script setup lang="ts">
@@ -166,7 +89,7 @@ import { tutorialApi, knowledgeApi, learnerApi } from '@/api'
 
 const router         = useRouter()
 const route          = useRoute()
-const topicKey       = ref((route.query.topic as string) || localStorage.getItem('last_topic') || '')
+const topicKey       = ref((route.query.topic as string) || '')
 const loading        = ref(false)
 const domainsLoading = ref(false)
 const tutorial       = ref<any>(null)
@@ -180,7 +103,7 @@ const renderedContent = computed(() => {
 })
 
 const completedCount = computed(() =>
-  Object.values(progress.value).filter((p: any) => p.status === 'read').length
+  Object.values(progress.value).filter((p: any) => p.completed).length
 )
 const progressPercent = computed(() => {
   const total = tutorial.value?.chapter_tree?.length || 0
@@ -208,7 +131,6 @@ async function loadDomains() {
 
 async function loadTutorial(forceRefresh = false) {
   if (!topicKey.value) return
-  localStorage.setItem('last_topic', topicKey.value)
   loading.value = true
   try {
     const res: any = await tutorialApi.getByTopic(topicKey.value, forceRefresh)
@@ -267,26 +189,6 @@ async function selectChapter(chapter: any) {
   currentChapter.value = chapter
 }
 
-async function markChapter(chapter: any, status: 'read' | 'skipped') {
-  if (!tutorial.value?.tutorial_id) return
-  const current = progress.value[chapter.chapter_id]?.status
-  // 再次点击同一状态则取消
-  const newStatus = current === status ? null : status
-  await learnerApi.markChapter({
-    tutorial_id: tutorial.value.tutorial_id,
-    chapter_id:  chapter.chapter_id,
-    completed:   newStatus === 'read',
-    status:      newStatus || 'read',
-  })
-  if (newStatus) {
-    progress.value[chapter.chapter_id] = { status: newStatus, completed: newStatus === 'read' }
-    ElMessage.success(newStatus === 'read' ? '已标记为已读' : '已标记为忽略')
-  } else {
-    delete progress.value[chapter.chapter_id]
-    ElMessage.success('已取消标记')
-  }
-}
-
 async function toggleComplete(chapter: any) {
   if (!tutorial.value?.tutorial_id) return
   const wasCompleted = progress.value[chapter.chapter_id]?.completed
@@ -308,14 +210,7 @@ function nextChapter() {
     currentChapter.value = tutorial.value.chapter_tree[currentIndex.value + 1]
 }
 function goChat() {
-  router.push({
-    path: '/chat',
-    query: {
-      topic:      topicKey.value,
-      chapter_id: currentChapter.value?.chapter_id || '',
-      chapter:    currentChapter.value?.title || '',
-    }
-  })
+  router.push({ path: '/chat', query: { topic: topicKey.value } })
 }
 
 watch(
@@ -335,103 +230,6 @@ onMounted(() => {
   loadDomains()
   if (topicKey.value) loadTutorial()
 })
-// ── H-2 测验 ──────────────────────────────────────────────────
-const quizVisible    = ref(false)
-const quizLoading    = ref(false)
-const quizSubmitted  = ref(false)
-const submitting     = ref(false)
-const showExplanation = ref(false)
-const quizQuestions  = ref<any[]>([])
-const userAnswers    = ref<Record<string, any>>({})
-const selfEval       = ref<Record<string, boolean>>({})
-const quizScore      = ref(0)
-const quizCorrect    = ref(0)
-const quizTotal      = ref(0)
-const quizChapter    = ref<any>(null)
-const allQuestions   = ref<any[]>([])
-
-function pickQuestions() {
-  const all = allQuestions.value
-  const pickCount = Math.max(3, Math.min(15, Math.round(all.length * 0.6)))
-  const shuffled = [...all].sort(() => Math.random() - 0.5)
-  quizQuestions.value = shuffled.slice(0, pickCount)
-  userAnswers.value   = {}
-  selfEval.value      = {}
-  showExplanation.value = false
-}
-
-async function startQuiz(chapter: any) {
-  quizChapter.value   = chapter
-  quizVisible.value   = true
-  quizLoading.value   = true
-  quizSubmitted.value = false
-  showExplanation.value = false
-  quizQuestions.value = []
-  userAnswers.value   = {}
-  selfEval.value      = {}
-  try {
-    const res: any = await learnerApi.getChapterQuiz(chapter.chapter_id)
-    allQuestions.value = res.data?.questions || []
-    pickQuestions()
-  } catch {
-    ElMessage.error('题目生成失败，请重试')
-    quizVisible.value = false
-  } finally {
-    quizLoading.value = false
-  }
-}
-
-function retryQuiz() {
-  quizSubmitted.value = false
-  pickQuestions()
-}
-
-async function submitQuiz() {
-  const questions = quizQuestions.value
-  // 检查是否全部作答
-  for (const q of questions) {
-    if (q.type === 'fill_blank') {
-      if (selfEval.value[q.question_id] === undefined) {
-        ElMessage.warning('请完成所有题目的自评')
-        return
-      }
-    } else if (userAnswers.value[q.question_id] === undefined) {
-      ElMessage.warning('请完成所有题目')
-      return
-    }
-  }
-
-  submitting.value = true
-  showExplanation.value = true
-  try {
-    const answers = questions.map((q: any) => {
-      let is_correct = false
-      if (q.type === 'single_choice') {
-        is_correct = userAnswers.value[q.question_id] === q.answer
-      } else if (q.type === 'true_false') {
-        is_correct = userAnswers.value[q.question_id] === q.answer
-      } else {
-        is_correct = selfEval.value[q.question_id] === true
-      }
-      return { question_id: q.question_id, entity_id: q.entity_id,
-               type: q.type, is_correct }
-    })
-
-    const res: any = await learnerApi.submitQuiz({
-      chapter_id: quizChapter.value.chapter_id,
-      answers,
-    })
-    quizScore.value   = res.data?.score || 0
-    quizCorrect.value = res.data?.correct || 0
-    quizTotal.value   = res.data?.total || 0
-    quizSubmitted.value = true
-  } catch {
-    ElMessage.error('提交失败，请重试')
-  } finally {
-    submitting.value = false
-  }
-}
-
 </script>
 
 <style scoped>

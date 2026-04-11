@@ -28,9 +28,9 @@ BLUEPRINT_SYNTHESIS_PROMPT = """你是课程设计师。根据技能信号设计
 {skill_signal_json}
 
 严格要求：
-- 章节总数 = ceil(知识点总数 / 4)，最少2章最多12章；阶段数 = ceil(章节总数 / 3)，最少2个阶段
+- 只输出 2 个阶段，每阶段 2 个章节，共 4 个章节
 - 章节标题必须是动词短语（如"识别SQL注入点"）
-- 阶段类型只选：foundation、practice、defense 之一
+- 阶段类型只选：foundation 或 practice
 - 每章 related_entities 最多 2 个，名称必须从【知识点列表】中完全照抄，不得修改
 - 输出合法 JSON，不含注释
 

@@ -28,10 +28,10 @@ BLUEPRINT_SYNTHESIS_PROMPT = """你是课程设计师。根据技能信号设计
 {skill_signal_json}
 
 严格要求：
-- 章节总数 = ceil(知识点总数 / 4)，最少2章最多12章；阶段数 = ceil(章节总数 / 3)，最少2个阶段
+- 只输出 2 个阶段，每阶段 2 个章节，共 4 个章节
 - 章节标题必须是动词短语（如"识别SQL注入点"）
-- 阶段类型只选：foundation、practice、defense 之一
-- 每章 related_entities 最多 2 个，名称必须从【知识点列表】中完全照抄，不得修改
+- 阶段类型只选：foundation 或 practice
+- 每章 related_entities 最多 2 个
 - 输出合法 JSON，不含注释
 
 严格按 JSON 输出：
@@ -141,8 +141,6 @@ async def _synthesize_blueprint_async(topic_key: str, space_id) -> None:
         [{"name": e["canonical_name"], "type": e["entity_type"]} for e in entities],
         ensure_ascii=False
     )
-    # 构建小写映射用于模糊匹配兜底
-    name_lower_to_id = {e["canonical_name"].lower().strip(): e["entity_id"] for e in entities}
 
     # ══════════════════════════════════════════
     # 第二段：LLM 调用（不持有任何 DB 连接）
@@ -198,8 +196,6 @@ async def _synthesize_blueprint_async(topic_key: str, space_id) -> None:
         async with session.begin():  # 자동 커밋/롤백
             repo = BlueprintRepository(session)
 
-            all_chapter_ids = []  # 收集所有章节id，用于均匀分配知识点
-
             blueprint_id = await repo.create_blueprint(
                 topic_key=topic_key,
                 title=blueprint_data.get("title", f"{topic_key} 技能课程"),
@@ -231,8 +227,11 @@ async def _synthesize_blueprint_async(topic_key: str, space_id) -> None:
                         common_mistakes=ch_data.get("common_mistakes"),
                         chapter_order=ch_order,
                     )
-                    # 暂存章节id，后续统一分配知识点
-                    all_chapter_ids.append(chapter_id)
+                    # 술어 연결
+                    for name in ch_data.get("related_entities", []):
+                        eid = entity_name_to_id.get(name)
+                        if eid:
+                            await repo.link_entity_to_chapter(chapter_id, eid, "core_term")
                     # 미리 생성된 내용 저장
                     ct = chapter_contents.get(ch_data.get("title",""), "")
                     if ct:
@@ -240,18 +239,7 @@ async def _synthesize_blueprint_async(topic_key: str, space_id) -> None:
 
                 logger.info("Stage written", order=stage_order, title=stage_data.get("title"))
 
-            # 均匀分配知识点到各章节
-            all_entity_ids = list(entity_name_to_id.values())
-            if all_chapter_ids and all_entity_ids:
-                import math
-                per_chapter = math.ceil(len(all_entity_ids) / len(all_chapter_ids))
-                for i, cid in enumerate(all_chapter_ids):
-                    start = i * per_chapter
-                    chunk = all_entity_ids[start:start + per_chapter]
-                    for eid in chunk:
-                        await repo.link_entity_to_chapter(cid, eid, "core_term")
-
-            await repo.update_blueprint_status(blueprint_id, "published")
+            await repo.update_blueprint_status(blueprint_id, "review")
         # ← session.begin() 컨텍스트 종료 시 자동 커밋
 
     logger.info("Blueprint synthesis complete, status=review",

@@ -7,7 +7,8 @@
           <el-select v-model="topicKey" placeholder="选择主题" size="small"
             style="width:200px" :loading="domainsLoading" @change="onTopicChange">
             <el-option v-for="d in domains" :key="d.domain_tag"
-              :label="d.domain_tag" :value="d.domain_tag" />
+              :label="`${d.domain_tag}（${d.space_type === 'global' ? '全局' : '私有'}）`"
+              :value="d.domain_tag" />
           </el-select>
           <el-button type="primary" size="small"
             :loading="generating || pathLoading"
@@ -19,10 +20,21 @@
       </template>
 
       <!-- 生成中 -->
-      <div v-if="generating" style="text-align:center;padding:40px">
-        <el-icon class="is-loading" style="font-size:32px;color:#409eff"><Loading /></el-icon>
-        <p style="color:#606266;margin-top:16px;font-size:15px">{{ generatingMsg }}</p>
-        <p style="color:#909399;font-size:12px;margin-top:6px">正在后台处理，请稍候…</p>
+      <div v-if="generating" style="padding:40px 24px">
+        <div style="text-align:center;margin-bottom:20px">
+          <el-icon class="is-loading" style="font-size:32px;color:#409eff"><Loading /></el-icon>
+          <p style="color:#606266;margin-top:12px;font-size:15px;font-weight:500">{{ generatingMsg }}</p>
+        </div>
+        <el-progress
+          :percentage="Math.round(fakeProgress)"
+          :stroke-width="10"
+          striped
+          striped-flow
+          :duration="10"
+          style="margin-bottom:12px" />
+        <p style="text-align:center;color:#909399;font-size:12px">
+          AI 正在根据知识图谱规划你的学习路径，通常需要 1-2 分钟
+        </p>
       </div>
 
       <!-- 路径加载中 -->
@@ -70,7 +82,7 @@ import { ElMessage } from 'element-plus'
 
 const router       = useRouter()
 const route        = useRoute()
-const topicKey     = ref((route.query.topic as string) || '')
+const topicKey     = ref((route.query.topic as string) || localStorage.getItem('last_topic') || '')
 const pathLoading  = ref(false)
 const domainsLoading = ref(false)
 const generating   = ref(false)
@@ -78,6 +90,8 @@ const generatingMsg = ref('正在生成蓝图…')
 const path         = ref<any>(null)
 const domains      = ref<any[]>([])
 let pollTimer: any = null
+let progressTimer: any = null
+const fakeProgress = ref(0)
 
 // 加载路径结果
 async function loadPath() {
@@ -100,12 +114,23 @@ function startPolling() {
   const msgs = ['正在分析知识结构…', '正在规划学习阶段…', '正在生成章节内容…', '即将完成，请稍候…']
   let i = 0
   generatingMsg.value = msgs[0]
+  fakeProgress.value = 0
+
+  // 模拟进度：每秒增长，最多到95%，完成后跳到100%
+  progressTimer = setInterval(() => {
+    if (fakeProgress.value < 95) {
+      const step = fakeProgress.value < 30 ? 3 : fakeProgress.value < 60 ? 2 : 0.5
+      fakeProgress.value = Math.min(95, fakeProgress.value + step)
+    }
+  }, 1000)
+
   pollTimer = setInterval(async () => {
     generatingMsg.value = msgs[Math.min(++i, msgs.length - 1)]
     try {
       const res: any = await blueprintApi.getStatus(topicKey.value)
       const status = res.data?.status
       if (status === 'published') {
+        fakeProgress.value = 100
         stopPolling()
         generating.value = false
         await loadPath()
@@ -120,11 +145,13 @@ function startPolling() {
 
 function stopPolling() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+  if (progressTimer) { clearInterval(progressTimer); progressTimer = null }
 }
 
 // 触发生成
 async function generate() {
   if (!topicKey.value) return
+  localStorage.setItem('last_topic', topicKey.value)
   generating.value = true
   path.value = null
   try {
@@ -151,10 +178,24 @@ onMounted(async () => {
   } finally {
     domainsLoading.value = false
   }
-  if (topicKey.value) loadPath()
+  if (topicKey.value) {
+    // 先查蓝图状态，如果正在生成则自动恢复轮询
+    try {
+      const res: any = await blueprintApi.getStatus(topicKey.value)
+      const status = res.data?.status
+      if (status === 'generating') {
+        generating.value = true
+        startPolling()
+      } else {
+        loadPath()
+      }
+    } catch {
+      loadPath()
+    }
+  }
 })
 
-onUnmounted(() => stopPolling())
+onUnmounted(() => { stopPolling() })
 </script>
 
 <style scoped>

@@ -145,8 +145,9 @@ const thinking       = ref(false)
 const messagesEl     = ref<HTMLElement>()
 
 // ── 话题（隐藏，从路由参数读取）────────────────
-const topicKey  = ref((route.query.topic as string) || 'web-security')
-const chapterId = ref((route.query.chapter_id as string) || '')
+const topicKey    = ref((route.query.topic as string) || 'web-security')
+const chapterId   = ref((route.query.chapter_id as string) || '')
+const chapterTitle = ref((route.query.chapter as string) || '')
 
 // ── 对话历史列表 ──────────────────────────────
 interface ConvItem {
@@ -332,7 +333,13 @@ async function sendMessage(text: string) {
 // ── 初始化 ────────────────────────────────────
 onMounted(async () => {
   await Promise.all([loadSpaces(), loadConversations()])
-  if (route.query.topic) newConversation()
+  if (route.query.topic) {
+    await newConversation()
+    // 如果从教程页跳转且带有章节信息，自动发送章节提示
+    if (chapterTitle.value && conversationId.value) {
+      await sendMessage(`我刚刚学习了「${chapterTitle.value}」这一章节，请针对这个章节的内容帮我解答问题。`)
+    }
+  }
 })
 </script>
 

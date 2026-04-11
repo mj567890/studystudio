@@ -85,8 +85,12 @@ export const learnerApi = {
     http.get(`/learners/me/gaps?topic_key=${topicKey}`),
   getRepairPath: (topicKey: string) =>
     http.get(`/learners/me/repair-path?topic_key=${topicKey}`),
-  markChapter: (data: { tutorial_id: string; chapter_id: string; completed: boolean }) =>
+  markChapter: (data: { tutorial_id: string; chapter_id: string; completed: boolean; status?: string }) =>
     http.post('/learners/me/chapter-progress', data),
+  getChapterQuiz: (chapterId: string) =>
+    http.get(`/learners/me/chapter-quiz/${chapterId}`),
+  submitQuiz: (data: { chapter_id: string; answers: any[] }) =>
+    http.post('/learners/me/chapter-quiz/submit', data),
   getChapterProgress: (tutorialId: string) =>
     http.get(`/learners/me/chapter-progress/${tutorialId}`),
 }

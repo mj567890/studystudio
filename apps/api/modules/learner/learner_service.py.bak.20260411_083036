@@ -420,18 +420,7 @@ class RepairPathService:
         if bp:
             return await self._compute_chapter_path(user_id, topic_key, str(bp[0]))
 
-        # ── 旧路径：无已发布蓝图时返回空路径 ──────────────────
-        return {
-            "user_id":      user_id,
-            "topic_key":    topic_key,
-            "path_type":    "none",
-            "path_steps":   [],
-            "is_truncated": False,
-            "total_steps":  0,
-            "message":      "该领域暂无学习路径，请先点击「生成路径」",
-        }
-
-        # ── 以下旧路径代码已停用 ──────────────────────────────────────────
+        # ── 旧路径：无已发布蓝图时保持原有逻辑不变 ──────────────────
         # 1. 获取已掌握节点（剪枝阈值 0.7，宽松，减少冗余步骤）
         mastery_svc = MasteryStateService(self.db)
         mastered    = await mastery_svc.get_mastered_entities(user_id, threshold=0.7)
