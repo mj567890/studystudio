@@ -446,6 +446,7 @@ class TeachingChatService:
                 {"type": "entity", "ref_id": r.entity_id, "title": r.canonical_name}
                 for r in retrieved[1:3]
             ],
+            "proactive_question": teach_resp.proactive_question,
             "diagnosis_update": {
                 "suspected_gap_types": [g.value for g in teach_resp.gap_types],
                 "updated_entities":    [r.entity_id for r in retrieved[:3]],

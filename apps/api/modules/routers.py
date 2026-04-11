@@ -122,7 +122,8 @@ async def get_repair_path(
 class ChapterProgressRequest(BaseModel):
     tutorial_id: str
     chapter_id:  str
-    completed:   bool
+    completed:        bool
+    duration_seconds: int = 0
 
 
 @learner_router.post("/chapter-progress")
@@ -136,19 +137,21 @@ async def mark_chapter_progress(
     await db.execute(
         _text("""
             INSERT INTO chapter_progress
-              (user_id, tutorial_id, chapter_id, completed, completed_at)
+              (user_id, tutorial_id, chapter_id, completed, completed_at, duration_seconds)
             VALUES
-              (:uid, :tid, :chid, :done, CASE WHEN :done THEN NOW() ELSE NULL END)
+              (:uid, :tid, :chid, :done, CASE WHEN :done THEN NOW() ELSE NULL END, :dur)
             ON CONFLICT (user_id, tutorial_id, chapter_id)
             DO UPDATE SET
-              completed    = EXCLUDED.completed,
-              completed_at = EXCLUDED.completed_at
+              completed        = EXCLUDED.completed,
+              completed_at     = EXCLUDED.completed_at,
+              duration_seconds = GREATEST(chapter_progress.duration_seconds, EXCLUDED.duration_seconds)
         """),
         {
             "uid":  current_user["user_id"],
             "tid":  req.tutorial_id,
             "chid": req.chapter_id,
             "done": req.completed,
+            "dur":  getattr(req, "duration_seconds", 0),
         }
     )
     await db.commit()
@@ -650,11 +653,27 @@ async def submit_chapter_quiz(
         )
         updated.append({"entity_id": ans.entity_id, "delta": delta, "correct": ans.is_correct})
 
-    await db.commit()
-
     correct = sum(1 for a in req.answers if a.is_correct)
     total   = len(req.answers)
     score   = round(correct / total * 100) if total else 0
+
+    # H-6 埋点：记录错题实体
+    import json as _json_h6, uuid as _uuid_h6
+    wrong_ids = [str(a.entity_id) for a in req.answers
+                 if not a.is_correct and getattr(a, "entity_id", None)]
+    await db.execute(
+        _text("""
+            INSERT INTO chapter_quiz_attempts
+              (id, user_id, chapter_id, score, correct_count, total_count, wrong_entity_ids)
+            VALUES
+              (gen_random_uuid(), CAST(:uid AS uuid), :cid,
+               :score, :correct, :total, CAST(:wrong AS jsonb))
+        """),
+        {"uid": user_id, "cid": req.chapter_id, "score": score,
+         "correct": correct, "total": total,
+         "wrong": _json_h6.dumps(wrong_ids)}
+    )
+    await db.commit()
 
     return {
         "code": 200, "msg": "success",

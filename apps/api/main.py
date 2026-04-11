@@ -41,6 +41,7 @@ from apps.api.modules.routers import (
 )
 from apps.api.modules.admin.router import router as admin_router
 from apps.api.modules.skill_blueprint.router import router as blueprint_router
+from apps.api.modules.learner.eight_dim_endpoints import eight_dim_router
 
 logger = structlog.get_logger(__name__)
 
@@ -78,6 +79,7 @@ def create_app() -> FastAPI:
     app.include_router(teaching_router)
     app.include_router(admin_router)
     app.include_router(blueprint_router)
+    app.include_router(eight_dim_router)
 
     @app.on_event("startup")
     async def startup() -> None:

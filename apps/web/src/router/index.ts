@@ -19,6 +19,7 @@ const router = createRouter({
         { path: 'tutorial', component: () => import('@/views/tutorial/TutorialView.vue') },
         { path: 'chat',     component: () => import('@/views/tutorial/ChatView.vue') },
         { path: 'upload',   component: () => import('@/views/learner/UploadView.vue') },
+        { path: 'notes',    component: () => import('@/views/learner/NotesView.vue') },
       ]
     },
     {

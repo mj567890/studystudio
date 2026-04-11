@@ -83,6 +83,10 @@
               </p>
             </div>
 
+            <div style="margin-top:6px;text-align:right">
+              <el-button link size="small" style="color:#909399;font-size:12px"
+                @click="saveAsNote(msg)">📌 存为笔记</el-button>
+            </div>
             <div v-if="msg.next_steps && msg.next_steps.length" class="next-steps">
               <p style="font-size:12px;color:#909399;margin-bottom:6px">🔗 相关知识点</p>
               <el-tag
@@ -93,6 +97,17 @@
                 @click="sendMessage(`请解释一下「${s.title}」`)"
               >{{ s.title }}</el-tag>
             </div>
+            <!-- H-7 苏格拉底式追问 -->
+            <div v-if="msg.proactive_question" class="proactive-q">
+              <span class="pq-icon">🤔</span>
+              <span class="pq-text">{{ msg.proactive_question }}</span>
+              <el-button
+                size="small" type="primary" plain
+                style="margin-left:8px;flex-shrink:0"
+                @click="sendMessage(msg.proactive_question)"
+              >回答这个问题</el-button>
+            </div>
+
           </div>
         </div>
 
@@ -132,7 +147,8 @@ import { ref, computed, nextTick, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { marked } from 'marked'
 import { Loading } from '@element-plus/icons-vue'
-import { teachingApi } from '@/api'
+import { learnerApi, knowledgeApi, tutorialApi, teachingApi, notesApi, convRenameApi } from '@/api'
+import { ElMessage, ElMessageBox } from 'element-plus'
 
 const route = useRoute()
 
@@ -285,9 +301,10 @@ async function send() {
     const data = res.data
     messages.value.push({
       role:       'assistant',
-      content:    data.assistant_message,
-      diagnosis:  data.diagnosis_update,
-      next_steps: data.suggested_next_steps,
+      content:            data.assistant_message,
+      diagnosis:          data.diagnosis_update,
+      next_steps:         data.suggested_next_steps,
+      proactive_question: data.proactive_question || null,
     })
     // 更新列表中的计数和时间，并置顶
     const conv = conversations.value.find(c => c.conversation_id === conversationId.value)
@@ -325,6 +342,37 @@ async function deleteConversation(cid: string) {
   }
 }
 
+async function saveAsNote(msg: any) {
+  if (!msg.content) return
+  try {
+    const res: any = await notesApi.create({
+      content:         msg.content,
+      source_type:     'ai_chat',
+      topic_key:       topicKey.value,
+      chapter_id:      chapterId.value || '',
+      chapter_title:   chapterTitle.value || '',
+      conversation_id: conversationId.value,
+    })
+    ElMessage.success(`已存为笔记：${res.data?.title || ''}`)
+  } catch {
+    ElMessage.error('存为笔记失败')
+  }
+}
+
+async function startRename(conv: any) {
+  try {
+    const { value } = await (ElMessageBox as any).prompt('输入新名称', '重命名对话', {
+      confirmButtonText: '确认',
+      cancelButtonText:  '取消',
+      inputValue:        conv.title || '',
+      inputValidator:    (v: string) => v.trim() ? true : '名称不能为空',
+    })
+    await convRenameApi.rename(conv.conversation_id, value.trim())
+    conv.title = value.trim()
+    ElMessage.success('已重命名')
+  } catch { /* 取消 */ }
+}
+
 async function sendMessage(text: string) {
   inputText.value = text
   await send()
@@ -344,6 +392,38 @@ onMounted(async () => {
 </script>
 
 <style scoped>
+.proactive-q {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 8px 12px;
+  background: #f0f7ff;
+  border: 1px solid #cce0ff;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #1a6db5;
+  flex-wrap: wrap;
+}
+.pq-icon { font-size: 14px; flex-shrink: 0; margin-top: 1px; }
+.pq-text { flex: 1; line-height: 1.5; min-width: 0; }
+
+.proactive-q {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 8px 12px;
+  background: #f0f7ff;
+  border: 1px solid #cce0ff;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #1a6db5;
+  flex-wrap: wrap;
+}
+.pq-icon { font-size: 14px; flex-shrink: 0; margin-top: 1px; }
+.pq-text { flex: 1; line-height: 1.5; min-width: 0; }
+
 .chat-layout {
   display: flex;
   height: calc(100vh - 64px);

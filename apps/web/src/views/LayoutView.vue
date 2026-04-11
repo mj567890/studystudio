@@ -11,6 +11,7 @@
         <el-menu-item index="/upload">
           <el-icon><Upload /></el-icon>① 上传资料
         </el-menu-item>
+        <el-menu-item index="/notes">📒 我的笔记</el-menu-item>
         <el-menu-item index="/path">
           <el-icon><Guide /></el-icon>② 生成路径
         </el-menu-item>

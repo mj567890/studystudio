@@ -53,8 +53,8 @@
           <div class="section-block">
             <p class="field-label">知识空间</p>
             <el-radio-group v-model="spaceType">
-              <el-radio label="personal">个人知识库（仅自己可见）</el-radio>
-              <el-radio label="global" :disabled="!canUseGlobal">全局知识库（需管理员/审核员权限）</el-radio>
+              <el-radio value="personal">个人知识库（仅自己可见）</el-radio>
+              <el-radio value="global" :disabled="!canUseGlobal">全局知识库（需管理员/审核员权限）</el-radio>
             </el-radio-group>
           </div>
 

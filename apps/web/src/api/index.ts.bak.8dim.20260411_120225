@@ -85,7 +85,7 @@ export const learnerApi = {
     http.get(`/learners/me/gaps?topic_key=${topicKey}`),
   getRepairPath: (topicKey: string) =>
     http.get(`/learners/me/repair-path?topic_key=${topicKey}`),
-  markChapter: (data: { tutorial_id: string; chapter_id: string; completed: boolean; status?: string; duration_seconds?: number }) =>
+  markChapter: (data: { tutorial_id: string; chapter_id: string; completed: boolean; status?: string }) =>
     http.post('/learners/me/chapter-progress', data),
   getChapterQuiz: (chapterId: string) =>
     http.get(`/learners/me/chapter-quiz/${chapterId}`),
@@ -192,103 +192,4 @@ export const adminApi = {
   updateConfig:     (data: { config_key: string; config_value: string }) =>
     http.post('/admin/system/configs', data),
   getStats:         ()    => http.get('/admin/system/stats'),
-}
-
-// ══ 八维度学习增强系统 API ════════════════════════════════════
-
-// D6：学习节奏偏好
-export const learningModeApi = {
-  get: () =>
-    http.get('/learners/me/learning-mode'),
-  set: (readMode: 'skim' | 'normal' | 'deep') =>
-    http.post('/learners/me/learning-mode', { read_mode: readMode }),
-}
-
-// D7：章末反思
-export const reflectApi = {
-  get: (chapterId: string) =>
-    http.get(`/learners/me/reflect/${chapterId}`),
-  submit: (data: { chapter_id: string; own_example: string; misconception?: string }) =>
-    http.post('/learners/me/reflect', data),
-}
-
-// D4：社区笔记
-export const socialApi = {
-  getNotes: (chapterId: string) =>
-    http.get(`/tutorials/social-notes/${chapterId}`),
-  postNote: (data: {
-    tutorial_id: string; chapter_id: string
-    note_type: string; content: string; is_public: boolean
-  }) => http.post('/tutorials/social-notes', data),
-  likeNote: (noteId: string) =>
-    http.post(`/tutorials/social-notes/${noteId}/like`),
-}
-
-// D8：成就 + 掌握度雷达
-export const achievementApi = {
-  list: () =>
-    http.get('/learners/me/achievements'),
-  radar: (topicKey: string) =>
-    http.get('/learners/me/mastery-radar', { params: { topic_key: topicKey } }),
-}
-
-
-// D2/D7：主观题 AI 批改
-export const rubricApi = {
-  check: (data: { question_id: string; ai_rubric: string; answer: string }) =>
-    http.post('/learners/me/rubric-check', data),
-}
-
-// H-5：关联知识推荐
-export const recommendApi = {
-  getRelated: (chapterId: string) =>
-    http.get('/learners/me/related-recommendations', { params: { chapter_id: chapterId } }),
-}
-
-// H-6：错题模式
-export const errorPatternApi = {
-  get: () => http.get('/learners/me/error-patterns'),
-}
-
-// 个人笔记
-export const notesApi = {
-  list:   (params?: { topic_key?: string; keyword?: string }) =>
-    http.get('/learners/me/notes', { params }),
-  create: (data: {
-    title?: string; content: string; source_type?: string
-    topic_key?: string; chapter_id?: string; chapter_title?: string
-    conversation_id?: string; tags?: string[]
-  }) => http.post('/learners/me/notes', data),
-  update: (noteId: string, data: { title?: string; content?: string; tags?: string[] }) =>
-    http.put(`/learners/me/notes/${noteId}`, data),
-  remove: (noteId: string) =>
-    http.delete(`/learners/me/notes/${noteId}`),
-  aiMerge: (noteIds: string[], notebookId?: string) =>
-    http.post('/learners/me/notes/ai-merge', { note_ids: noteIds, notebook_id: notebookId || '' }),
-}
-
-// 对话重命名
-export const convRenameApi = {
-  rename: (conversationId: string, title: string) =>
-    http.put(`/teaching/conversations/${conversationId}/title`, { title }),
-}
-
-// 笔记本
-export const notebooksApi = {
-  list:   () => http.get('/learners/me/notebooks'),
-  create: (data: { name: string; topic_key?: string }) =>
-    http.post('/learners/me/notebooks', data),
-  rename: (notebookId: string, name: string) =>
-    http.put(`/learners/me/notebooks/${notebookId}`, { name }),
-  remove: (notebookId: string) =>
-    http.delete(`/learners/me/notebooks/${notebookId}`),
-  moveNote: (noteId: string, notebookId: string | null) =>
-    http.put(`/learners/me/notes/${noteId}/notebook`, { notebook_id: notebookId }),
-}
-
-
-// 复习提醒
-export const reviewApi = {
-  getDue:       () => http.get('/learners/me/notes/due-review'),
-  markReviewed: (noteId: string) => http.post(`/learners/me/notes/${noteId}/reviewed`, {}),
 }

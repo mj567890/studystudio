@@ -29,13 +29,15 @@ TEACHING_STRUCTURED_PROMPT_SUFFIX = """
   "response": "你的教学回答（支持 markdown 格式）",
   "certainty_level": "high|medium|low",
   "gap_types": ["mechanism"],
-  "error_pattern": "一句话描述用户的错误推理，如无则为 null"
+  "error_pattern": "一句话描述用户的错误推理，如无则为 null",
+  "proactive_question": "苏格拉底式追问，引导深化理解；无需追问时为 null"
 }
 certainty_level 含义：
   high   = 对用户理解核心概念有较高把握
   medium = 用户问题模糊，理解情况不确定
   low    = 用户存在明显误解，需要重新解释
 gap_types 可选值：definition / mechanism / flow / distinction / application / causal
+proactive_question：certainty_level 为 low/medium 时生成开放式追问，high 且无 gap 时为 null
 """
 
 
@@ -47,11 +49,13 @@ class TeachResponse:
         certainty_level: str,
         gap_types: list[str],
         error_pattern: str | None,
+        proactive_question: str | None = None,
     ) -> None:
-        self.response_text    = response_text
-        self.certainty_level  = certainty_level
-        self.gap_types        = [GapType(g) for g in gap_types if g in GapType._value2member_map_]
-        self.error_pattern    = error_pattern
+        self.response_text       = response_text
+        self.certainty_level     = certainty_level
+        self.gap_types           = [GapType(g) for g in gap_types if g in GapType._value2member_map_]
+        self.error_pattern       = error_pattern
+        self.proactive_question  = proactive_question
 
 
 def normalize_rrf_score(raw_rrf: float, num_paths: int = 2, k: int = 60) -> float:
@@ -134,6 +138,7 @@ class LLMGateway:
             certainty_level=data.get("certainty_level", "medium"),
             gap_types=data.get("gap_types", []),
             error_pattern=data.get("error_pattern"),
+            proactive_question=data.get("proactive_question"),
         )
 
     def _template_response(self, knowledge_context: list[Any]) -> TeachResponse:

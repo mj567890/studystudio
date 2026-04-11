@@ -862,9 +862,10 @@ async def get_system_stats(
 # FE-A05：章节进度
 # ════════════════════════════════════════════════════════════════
 class MarkChapterRequest(BaseModel):
-    tutorial_id: str
-    chapter_id:  str
-    completed:   bool = True
+    tutorial_id:      str
+    chapter_id:       str
+    completed:        bool = True
+    duration_seconds: int  = 0
 
 
 @router.post("/learners/me/chapter-progress")

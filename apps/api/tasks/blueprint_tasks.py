@@ -55,13 +55,22 @@ BLUEPRINT_SYNTHESIS_PROMPT = """你是课程设计师。根据技能信号设计
   ]
 }}"""
 
-CHAPTER_CONTENT_PROMPT = """为技能课程撰写章节正文（300-500字）。
+CHAPTER_CONTENT_PROMPT = """为职业技能课程撰写章节正文，严格按结构输出 JSON。
 
 本章：{chapter_title}
 目标：{objective}
 任务：{task_description}
 
-遇到术语用【术语名】标注。只输出正文："""
+只输出以下 JSON，不含 markdown 代码块：
+{{
+  "scene_hook": "100字以内，一个真实职场情境，以'你'开头，引出本章核心问题",
+  "skim_summary": "用分号分隔的3条要点，每条不超过20字",
+  "full_content": "正文400-600字，含概念/原理/示例，术语用【名称】标注，在适当位置插入1-2个<!--CHECKPOINT:问题|解析提示-->标记",
+  "misconception_block": "⚠️ 很多人误认为……，实际上……（针对本章常见误解）",
+  "prereq_adaptive": {{
+    "if_high": "必填。针对已掌握基础的学员，补充一个更深层的技术细节、边界案例或进阶应用场景，50字以内"
+  }}
+}}"""
 
 
 @celery_app.task(bind=True, max_retries=5, default_retry_delay=60)

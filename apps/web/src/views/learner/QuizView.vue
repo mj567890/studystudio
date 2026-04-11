@@ -23,7 +23,7 @@
         <div v-for="(q, idx) in quiz?.questions" :key="q.question_id" class="question">
           <p class="q-title">{{ idx + 1 }}. {{ q.stem }}</p>
           <el-radio-group v-model="answers[q.question_id]">
-            <el-radio v-for="opt in q.options" :key="opt" :label="opt.charAt(0)"
+            <el-radio v-for="opt in q.options" :key="opt" :value="opt.charAt(0)"
               style="display:block;margin:6px 0">{{ opt }}</el-radio>
           </el-radio-group>
         </div>

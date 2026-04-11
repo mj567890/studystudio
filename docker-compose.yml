@@ -55,6 +55,12 @@ services:
     command: celery -A apps.api.tasks.tutorial_tasks.celery_app worker
              --loglevel=info --concurrency=4 --queues=tutorial,low_priority
              --without-heartbeat --without-mingle --without-gossip
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://user:pass@postgres:5432/adaptive_learning
+      - REDIS_URL=redis://redis:6379
+      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672/
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - MINIO_ENDPOINT=http://minio:9000
 
   celery_worker_knowledge:
     build:
