@@ -455,6 +455,153 @@ async def get_error_patterns(
 
 
 
+
+# ── 阶段能力证书 PDF ──────────────────────────────────────────────────────
+
+from fastapi.responses import StreamingResponse
+import io
+from datetime import datetime
+
+@eight_dim_router.get("/learners/me/certificate")
+async def download_certificate(
+    topic_key: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    uid = current_user["user_id"]
+
+    # 查用户信息
+    user_row = (await db.execute(text("""
+        SELECT nickname, email FROM users WHERE user_id = CAST(:uid AS uuid)
+    """), {"uid": uid})).fetchone()
+    nickname = (user_row.nickname or user_row.email.split("@")[0]) if user_row else "学员"
+
+    # 查主题信息和完成情况
+    topic_row = (await db.execute(text("""
+        SELECT title FROM skill_blueprints WHERE topic_key = :tk LIMIT 1
+    """), {"tk": topic_key})).fetchone()
+    topic_name = topic_row.title if topic_row else topic_key
+
+    total = (await db.execute(text("""
+        SELECT COUNT(*) FROM skill_chapters sc
+        JOIN skill_blueprints sb ON sb.blueprint_id = sc.blueprint_id
+        WHERE sb.topic_key = :tk
+    """), {"tk": topic_key})).scalar() or 0
+
+    completed = (await db.execute(text("""
+        SELECT COUNT(DISTINCT sc.chapter_id)
+        FROM skill_chapters sc
+        JOIN skill_blueprints sb ON sb.blueprint_id = sc.blueprint_id
+        JOIN chapter_progress cp
+          ON cp.chapter_id = sc.chapter_id::text
+         AND cp.user_id = CAST(:uid AS uuid)
+         AND cp.status = 'read'
+        WHERE sb.topic_key = :tk
+    """), {"uid": uid, "tk": topic_key})).scalar() or 0
+
+    if total == 0 or completed < total:
+        raise HTTPException(400, detail={
+            "code": "CERT_001",
+            "msg": f"尚未完成全部章节（{completed}/{total}），无法颁发证书"
+        })
+
+    await db.commit()  # 数据读取完毕，提交释放连接
+
+    # 生成证书编号
+    import hashlib
+    cert_no = hashlib.md5(f"{uid}{topic_key}{datetime.utcnow().date()}".encode()).hexdigest()[:12].upper()
+    issue_date = datetime.utcnow().strftime("%Y年%m月%d日")
+
+    # 生成 PDF
+    pdf_buf = _build_certificate_pdf(nickname, topic_name, issue_date, cert_no)
+
+    # 把 bytes 全部读出来，避免 StreamingResponse 惰性读取时 session 已关闭
+    pdf_bytes = pdf_buf.read()
+    return StreamingResponse(
+        iter([pdf_bytes]),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="certificate_{topic_key}.pdf"'}
+    )
+
+
+def _build_certificate_pdf(name: str, topic: str, date: str, cert_no: str) -> io.BytesIO:
+    from fpdf import FPDF
+
+    FONT_PATH = "/app/apps/api/assets/fonts/NotoSansCJK.ttf"
+
+    class CertPDF(FPDF):
+        pass
+
+    pdf = CertPDF(orientation="L", unit="mm", format="A4")
+    pdf.add_page()
+    pdf.add_font("Noto", "", FONT_PATH)
+
+    W, H = 297, 210  # A4 横版
+
+    # 背景色
+    pdf.set_fill_color(248, 246, 240)
+    pdf.rect(0, 0, W, H, "F")
+
+    # 外边框
+    pdf.set_draw_color(201, 168, 76)
+    pdf.set_line_width(1.2)
+    pdf.rect(10, 10, W-20, H-20)
+
+    # 内边框
+    pdf.set_line_width(0.4)
+    pdf.rect(14, 14, W-28, H-28)
+
+    # 标题
+    pdf.set_font("Noto", size=36)
+    pdf.set_text_color(44, 44, 44)
+    pdf.set_y(30)
+    pdf.cell(0, 15, "结  业  证  书", align="C", ln=True)
+
+    # 副标题
+    pdf.set_font("Noto", size=12)
+    pdf.set_text_color(120, 120, 120)
+    pdf.cell(0, 8, "CERTIFICATE OF COMPLETION", align="C", ln=True)
+
+    # 分隔线
+    pdf.set_draw_color(201, 168, 76)
+    pdf.set_line_width(0.3)
+    pdf.line(50, pdf.get_y()+3, W-50, pdf.get_y()+3)
+    pdf.ln(10)
+
+    # 正文
+    pdf.set_font("Noto", size=14)
+    pdf.set_text_color(60, 60, 60)
+    pdf.cell(0, 10, "兹证明", align="C", ln=True)
+
+    # 姓名
+    pdf.set_font("Noto", size=28)
+    pdf.set_text_color(201, 168, 76)
+    pdf.cell(0, 14, name, align="C", ln=True)
+
+    # 姓名下划线
+    y = pdf.get_y()
+    pdf.set_draw_color(201, 168, 76)
+    pdf.set_line_width(0.5)
+    pdf.line(90, y, W-90, y)
+    pdf.ln(8)
+
+    # 完成说明
+    pdf.set_font("Noto", size=14)
+    pdf.set_text_color(60, 60, 60)
+    pdf.cell(0, 10, f"已完成「{topic}」全部学习内容", align="C", ln=True)
+    pdf.cell(0, 10, "具备该领域的系统知识与实践能力", align="C", ln=True)
+
+    # 底部信息
+    pdf.set_y(H - 22)
+    pdf.set_font("Noto", size=10)
+    pdf.set_text_color(140, 140, 140)
+    pdf.cell(60, 8, f"颁发日期：{date}", align="L")
+    pdf.cell(0, 8, f"StudyStudio 自适应学习平台", align="C")
+    pdf.cell(-60, 8, f"证书编号：{cert_no}", align="R")
+
+    buf = io.BytesIO(pdf.output())
+    return buf
+
 # ── 复习提醒 ─────────────────────────────────────────────────────────────
 
 REVIEW_INTERVALS = [1, 3, 7, 14, 30]  # 天数
@@ -574,10 +721,11 @@ async def ai_merge_notes(
     if not rows:
         raise HTTPException(404, detail={"code": "MERGE_002", "msg": "笔记不存在"})
 
-    await db.commit()  # 提交事务，释放连接后再调用 LLM
+    # 取出数据后不再使用 db，让 FastAPI 在请求结束时自动归还连接
+    note_data = [(r.title, r.content) for r in rows]
 
     fragments = "\n\n---\n\n".join(
-        f"【{r.title or '无标题'}】\n{r.content}" for r in rows
+        f"【{title or '无标题'}】\n{content}" for title, content in note_data
     )
 
     from apps.api.core.llm_gateway import LLMGateway

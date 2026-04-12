@@ -30,11 +30,19 @@ from packages.shared_schemas.enums import CERTAINTY_SCORE_MAP, GapType
 logger = structlog.get_logger(__name__)
 
 TEACHING_SYSTEM_PROMPT = """你是一位专业的自适应学习辅导教师。
-学习者当前知识掌握情况摘要：{mastery_summary}
+
+## 学习者当前状态
+知识掌握摘要：{mastery_summary}
 当前学习主题：{topic}
 
-请根据学习者的掌握情况，用清晰、易懂的语言回答问题，必要时举例说明。
-如发现学习者存在知识误解，请温和地纠正并解释正确概念。
+## 自适应教学策略（请严格遵守）
+{adaptive_strategy}
+
+## 通用教学原则
+- 如发现学习者存在知识误解，温和纠正并解释正确概念
+- 优先用具体例子和类比帮助理解
+- 回答长度与问题复杂度匹配，不要过度展开
+- 保持对话自然，不要像在朗读教材
 """
 
 
@@ -46,6 +54,50 @@ SIMPLE_HOW_PATTERNS = [
     "怎么用", "怎么打开", "如何下载",
 ]
 
+
+
+def build_adaptive_strategy(mastery_summary: dict, topic: str) -> str:
+    """根据学习者掌握情况生成自适应教学策略指令。"""
+    if not mastery_summary:
+        return (
+            "- 学习者为新手，无历史掌握数据\n"
+            "- 请从基础概念入手，用简单语言和类比解释\n"
+            "- 避免使用专业术语，如必须使用请立即解释\n"
+            "- 每次回答聚焦一个核心概念"
+        )
+
+    # 统计掌握度分布
+    scores = [v for v in mastery_summary.values() if isinstance(v, (int, float))]
+    if not scores:
+        avg = 0.0
+    else:
+        avg = sum(scores) / len(scores)
+
+    weak = [k for k, v in mastery_summary.items() if isinstance(v, (int, float)) and v < 0.4]
+    medium = [k for k, v in mastery_summary.items() if isinstance(v, (int, float)) and 0.4 <= v < 0.7]
+    strong = [k for k, v in mastery_summary.items() if isinstance(v, (int, float)) and v >= 0.7]
+
+    lines = []
+
+    if avg < 0.35:
+        lines.append("- 学习者整体掌握度较低，请使用入门级讲解方式")
+        lines.append("- 优先解释基础定义，再展开机制和原理")
+        lines.append("- 每个回答结尾用一句话总结核心要点")
+    elif avg < 0.65:
+        lines.append("- 学习者具备一定基础，可以使用中级讲解方式")
+        lines.append("- 可以假设学习者了解基本概念，直接深入机制和原理")
+        lines.append("- 鼓励学习者自己推理，适当留白引导思考")
+    else:
+        lines.append("- 学习者掌握度较高，请使用进阶讲解方式")
+        lines.append("- 可以直接讨论边界情况、权衡取舍和实际应用")
+        lines.append("- 适合进行苏格拉底式深度追问，挑战学习者思维")
+
+    if weak:
+        lines.append(f"- 以下知识点掌握薄弱，讲解时需额外强化：{', '.join(weak[:3])}")
+    if strong:
+        lines.append(f"- 以下知识点已掌握，无需重复解释：{', '.join(strong[:3])}")
+
+    return "\n".join(lines)
 
 def classify_query_complexity(message: str, gap_types: list = None) -> str:
     """
@@ -378,6 +430,7 @@ class TeachingChatService:
         # LLM 教学调用（结构化输出，三级降级）
         system_prompt = TEACHING_SYSTEM_PROMPT.format(
             mastery_summary=json.dumps(mastery_summary, ensure_ascii=False)[:500],
+            adaptive_strategy=build_adaptive_strategy(mastery_summary, topic_key),
             topic=topic_key,
         )
         teach_resp: TeachResponse = await self.llm.teach(

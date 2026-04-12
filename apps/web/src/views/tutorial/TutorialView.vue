@@ -57,6 +57,12 @@
                   {{ progress[currentChapter.chapter_id]?.status==='read'?'✓ 已读':'标记已读' }}
                 </el-button>
                 <el-button size="small" :type="progress[currentChapter.chapter_id]?.status==='skipped'?'warning':'default'" @click="markChapter(currentChapter,'skipped')">忽略</el-button>
+                <el-button
+                  v-if="allCompleted"
+                  size="small" type="warning"
+                  :loading="certLoading"
+                  @click="downloadCert"
+                >🏆 下载证书</el-button>
               </div>
             </div>
           </template>
@@ -282,7 +288,7 @@ import { ref, computed, watch, onMounted, reactive } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
-import { learnerApi, knowledgeApi, tutorialApi, recommendApi, errorPatternApi } from '@/api'
+import { learnerApi, knowledgeApi, tutorialApi, recommendApi, errorPatternApi, certificateApi } from '@/api'
 
 async function getNewApis() {
   const mod = await import('@/api')
@@ -402,9 +408,10 @@ async function selectChapter(ch: any) {
   chapterEnterTime.value = Date.now()
   errorPatterns.value = []
   currentChapter.value = ch
-  if (tutorial.value?.tutorial_id) {
+  const tid = tutorial.value?.tutorial_id || tutorial.value?.blueprint_id
+  if (tid) {
     try {
-      const res: any = await learnerApi.getChapterProgress(tutorial.value.tutorial_id)
+      const res: any = await learnerApi.getChapterProgress(tid)
       progress.value = res.data?.progress || {}
     } catch (_) {}
   }
@@ -453,6 +460,37 @@ async function markChapter(chapter: any, newStatus: string) {
   } else {
     delete progress.value[chapter.chapter_id]
     ElMessage.success('已取消标记')
+  }
+}
+
+const certLoading = ref(false)
+
+const allCompleted = computed(() => {
+  const all = tutorial.value?.stages?.flatMap((s: any) => s.chapters || []) || []
+  if (all.length === 0) return false
+  return all.every((ch: any) => progress.value[ch.chapter_id]?.status === 'read')
+})
+
+async function downloadCert() {
+  if (!topicKey.value) return
+  certLoading.value = true
+  try {
+    const res: any = await certificateApi.download(topicKey.value)
+    const blob = res instanceof Blob ? res : new Blob([res], { type: 'application/pdf' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `certificate_${topicKey.value}.pdf`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+    ElMessage.success('证书下载成功')
+  } catch (e: any) {
+    const msg = e?.response?.data?.detail?.msg || '尚未完成全部章节'
+    ElMessage.warning(msg)
+  } finally {
+    certLoading.value = false
   }
 }
 

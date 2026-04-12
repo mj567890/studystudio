@@ -168,7 +168,7 @@ async def get_chapter_progress(
     from sqlalchemy import text as _text
     result = await db.execute(
         _text("""
-            SELECT chapter_id::text, completed, completed_at
+            SELECT chapter_id::text, completed, completed_at, status
             FROM chapter_progress
             WHERE user_id = :uid AND tutorial_id = :tid
         """),
@@ -178,6 +178,7 @@ async def get_chapter_progress(
         r.chapter_id: {
             "completed":    r.completed,
             "completed_at": r.completed_at.isoformat() if r.completed_at else None,
+            "status":       r.status if r.status else ("read" if r.completed else None),
         }
         for r in result.fetchall()
     }

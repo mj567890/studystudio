@@ -292,3 +292,12 @@ export const reviewApi = {
   getDue:       () => http.get('/learners/me/notes/due-review'),
   markReviewed: (noteId: string) => http.post(`/learners/me/notes/${noteId}/reviewed`, {}),
 }
+
+// 证书下载
+export const certificateApi = {
+  download: (topicKey: string) =>
+    http.get(`/learners/me/certificate`, {
+      params: { topic_key: topicKey },
+      responseType: 'blob',
+    }),
+}
