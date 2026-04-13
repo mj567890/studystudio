@@ -8,6 +8,7 @@
         <el-menu-item index="/admin/users"><el-icon><User /></el-icon>用户管理</el-menu-item>
         <el-menu-item index="/admin/knowledge"><el-icon><Collection /></el-icon>知识库管理</el-menu-item>
         <el-menu-item index="/admin/config"><el-icon><Tools /></el-icon>系统配置</el-menu-item>
+        <el-menu-item index="/admin/ai-config"><el-icon><Setting /></el-icon>AI 配置</el-menu-item>
         <el-divider style="margin:8px 0;border-color:#2d3f50" />
         <el-menu-item index="/"><el-icon><Back /></el-icon>返回学习端</el-menu-item>
       </el-menu>
@@ -35,6 +36,7 @@ const titleMap: Record<string, string> = {
   '/admin/users':      '用户管理',
   '/admin/knowledge':  '知识库管理',
   '/admin/config':     '系统配置',
+  '/admin/ai-config':  'AI 配置',
 }
 const pageTitle = computed(() => titleMap[route.path] || '管理后台')
 </script>

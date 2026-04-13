@@ -171,18 +171,6 @@ async def _auto_review_async(space_id: str) -> None:
                     {"ids": rejected_ids}
                 )
 
-    # ── Phase 1 hook: 给所有刚 approved 的实体派发 embedding 任务 ──
-    if approved_ids:
-        try:
-            from apps.api.tasks.embedding_tasks import embed_single_entity
-            for eid in approved_ids:
-                embed_single_entity.apply_async(args=[eid], queue="knowledge")
-            logger.info("embedding tasks dispatched after auto_review",
-                        count=len(approved_ids))
-        except Exception as _e:
-            logger.warning("Failed to dispatch embedding tasks",
-                           error=str(_e), count=len(approved_ids))
-
     # ── 还有更多 pending 则继续 ──────────────────────────────────
     if len(entities) >= 100:
         auto_review_entities.apply_async(

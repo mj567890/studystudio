@@ -71,8 +71,6 @@ services:
       - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com/v1}
       - LLM_DEFAULT_MODEL=${LLM_DEFAULT_MODEL:-gpt-4o}
       - PYTHONPATH=/app
-    volumes:
-      - ./apps/api:/app/apps/api
     healthcheck:
       test: ["CMD-SHELL", "celery -A apps.api.tasks.tutorial_tasks.celery_app inspect ping --timeout 8 2>&1 | grep -q pong"]
       interval: 30s
@@ -101,8 +99,6 @@ services:
       - LLM_DEFAULT_MODEL=${LLM_DEFAULT_MODEL:-gpt-4o}
       - PYTHONPATH=/app
     depends_on: [api, rabbitmq, postgres]
-    volumes:
-      - ./apps/api:/app/apps/api
     healthcheck:
       test: ["CMD-SHELL", "celery -A apps.api.tasks.tutorial_tasks.celery_app inspect ping --timeout 8 2>&1 | grep -q pong"]
       interval: 30s

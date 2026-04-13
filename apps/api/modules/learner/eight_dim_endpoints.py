@@ -60,8 +60,8 @@ _REFLECT_PROMPT = (
     "章节要点：{summary}\n"
     "学员解释：{answer}\n\n"
     "输出JSON（不含markdown）：\n"
-    '{{"score":0.8,"strengths":"理解正确处",'
-    '"gaps":"遗漏偏差","suggestion":"改进建议","corrected_example":"修正写法"}}\n'
+    '{"score":0.8,"strengths":"理解正确处",'
+    '"gaps":"遗漏偏差","suggestion":"改进建议","corrected_example":"修正写法"}\n'
     "score范围0-1。"
 )
 
@@ -455,6 +455,226 @@ async def get_error_patterns(
 
 
 
+
+
+# ── 学习墙 ───────────────────────────────────────────────────────────────
+
+class WallPostRequest(BaseModel):
+    chapter_id: str
+    topic_key:  str = ""
+    post_type:  str = "stuck"   # stuck | tip | discuss
+    content:    str
+
+class WallReplyRequest(BaseModel):
+    content: str
+
+
+@eight_dim_router.get("/wall/posts")
+async def list_wall_posts(
+    chapter_id: str = "",
+    topic_key:  str = "",
+    post_type:  str = "",
+    status:     str = "",
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    conditions = ["1=1"]
+    params: dict = {}
+    if chapter_id:
+        conditions.append("p.chapter_id = :chapter_id")
+        params["chapter_id"] = chapter_id
+    if topic_key:
+        conditions.append("p.topic_key = :topic_key")
+        params["topic_key"] = topic_key
+    if post_type:
+        conditions.append("p.post_type = :post_type")
+        params["post_type"] = post_type
+    if status:
+        conditions.append("p.status = :status")
+        params["status"] = status
+
+    where = " AND ".join(conditions)
+    rows = (await db.execute(text(f"""
+        SELECT p.post_id::text, p.user_id::text, p.chapter_id, p.topic_key,
+               p.post_type, p.content, p.status, p.is_featured, p.likes,
+               p.created_at, p.updated_at,
+               u.nickname, u.avatar_url,
+               COUNT(r.reply_id) AS reply_count
+        FROM wall_posts p
+        JOIN users u ON u.user_id = p.user_id
+        LEFT JOIN wall_replies r ON r.post_id = p.post_id
+        WHERE {where}
+        GROUP BY p.post_id, u.nickname, u.avatar_url
+        ORDER BY p.is_featured DESC, p.created_at DESC
+        LIMIT 50
+    """), params)).fetchall()
+
+    post_ids = [r.post_id for r in rows]
+
+    # 批量获取每个帖子的第一条 AI 回复
+    ai_replies = {}
+    if post_ids:
+        placeholders = ", ".join([f"CAST(:pid{i} AS uuid)" for i in range(len(post_ids))])
+        ai_params = {f"pid{i}": pid for i, pid in enumerate(post_ids)}
+        ai_rows = (await db.execute(text(f"""
+            SELECT DISTINCT ON (post_id) post_id::text, content
+            FROM wall_replies
+            WHERE post_id IN ({placeholders}) AND is_ai = true
+            ORDER BY post_id, created_at
+        """), ai_params)).fetchall()
+        ai_replies = {r.post_id: r.content for r in ai_rows}
+
+    posts = [
+        {
+            "post_id":     r.post_id,
+            "user_id":     r.user_id,
+            "nickname":    r.nickname or "匿名",
+            "avatar_url":  r.avatar_url,
+            "chapter_id":  r.chapter_id,
+            "topic_key":   r.topic_key,
+            "post_type":   r.post_type,
+            "content":     r.content,
+            "status":      r.status,
+            "is_featured": r.is_featured,
+            "likes":       r.likes,
+            "reply_count": r.reply_count,
+            "created_at":  r.created_at.isoformat(),
+            "is_mine":     r.user_id == str(current_user["user_id"]),
+            "ai_reply":    ai_replies.get(r.post_id),
+        }
+        for r in rows
+    ]
+    return {"code": 200, "msg": "success", "data": {"posts": posts}}
+
+
+@eight_dim_router.post("/wall/posts")
+async def create_wall_post(
+    req: WallPostRequest,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if not req.content.strip():
+        raise HTTPException(400, detail={"msg": "内容不能为空"})
+    uid = current_user["user_id"]
+    pid = str(uuid.uuid4())
+    await db.execute(text("""
+        INSERT INTO wall_posts (post_id, user_id, chapter_id, topic_key, post_type, content)
+        VALUES (CAST(:pid AS uuid), CAST(:uid AS uuid), :cid, :tk, :pt, :content)
+    """), {"pid": pid, "uid": uid, "cid": req.chapter_id,
+            "tk": req.topic_key, "pt": req.post_type, "content": req.content})
+    await db.commit()
+
+    # 求助型帖子 AI 自动初答（后台异步，不阻塞发帖响应）
+    if req.post_type == "stuck":
+        import asyncio
+        async def _ai_reply_bg(post_id: str, topic_key: str, content: str, user_id: str):
+            try:
+                from apps.api.core.llm_gateway import LLMGateway
+                from apps.api.core.db import async_session_factory
+                gw = LLMGateway()
+                prompt = f"""一位学员在学习「{topic_key}」时遇到了困难，发帖内容如下：
+
+{content}
+
+请给出一个简洁、有针对性的引导性回答（不要直接给出完整答案，而是帮助学员自己思考），100字以内。"""
+                ai_content = await gw.generate(prompt, model_route="knowledge_extraction")
+                rid = str(uuid.uuid4())
+                async with async_session_factory() as bg_db:
+                    await bg_db.execute(text("""
+                        INSERT INTO wall_replies (reply_id, post_id, user_id, content, is_ai)
+                        VALUES (CAST(:rid AS uuid), CAST(:pid AS uuid),
+                                CAST(:uid AS uuid), :content, true)
+                    """), {"rid": rid, "pid": post_id, "uid": user_id, "content": ai_content})
+                    await bg_db.commit()
+            except Exception:
+                pass
+        asyncio.create_task(_ai_reply_bg(pid, req.topic_key, req.content, str(uid)))
+
+    return {"code": 200, "msg": "success", "data": {
+        "post_id": pid, "ai_reply": None
+    }}
+
+
+@eight_dim_router.get("/wall/posts/{post_id}/replies")
+async def list_replies(
+    post_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    rows = (await db.execute(text("""
+        SELECT r.reply_id::text, r.user_id::text, r.content, r.is_ai,
+               r.likes, r.created_at, u.nickname, u.avatar_url
+        FROM wall_replies r
+        JOIN users u ON u.user_id = r.user_id
+        WHERE r.post_id = CAST(:pid AS uuid)
+        ORDER BY r.created_at
+    """), {"pid": post_id})).fetchall()
+
+    replies = [
+        {
+            "reply_id":   r.reply_id,
+            "user_id":    r.user_id,
+            "nickname":   r.nickname or "匿名",
+            "avatar_url": r.avatar_url,
+            "content":    r.content,
+            "is_ai":      r.is_ai,
+            "likes":      r.likes,
+            "created_at": r.created_at.isoformat(),
+            "is_mine":    r.user_id == str(current_user["user_id"]),
+        }
+        for r in rows
+    ]
+    return {"code": 200, "msg": "success", "data": {"replies": replies}}
+
+
+@eight_dim_router.post("/wall/posts/{post_id}/replies")
+async def create_reply(
+    post_id: str,
+    req: WallReplyRequest,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if not req.content.strip():
+        raise HTTPException(400, detail={"msg": "回复内容不能为空"})
+    rid = str(uuid.uuid4())
+    await db.execute(text("""
+        INSERT INTO wall_replies (reply_id, post_id, user_id, content)
+        VALUES (CAST(:rid AS uuid), CAST(:pid AS uuid), CAST(:uid AS uuid), :content)
+    """), {"rid": rid, "pid": post_id, "uid": current_user["user_id"], "content": req.content})
+    await db.execute(text("""
+        UPDATE wall_posts SET updated_at = NOW()
+        WHERE post_id = CAST(:pid AS uuid)
+    """), {"pid": post_id})
+    await db.commit()
+    return {"code": 200, "msg": "success", "data": {"reply_id": rid}}
+
+
+@eight_dim_router.post("/wall/posts/{post_id}/resolve")
+async def resolve_post(
+    post_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await db.execute(text("""
+        UPDATE wall_posts SET status = 'resolved'
+        WHERE post_id = CAST(:pid AS uuid) AND user_id = CAST(:uid AS uuid)
+    """), {"pid": post_id, "uid": current_user["user_id"]})
+    await db.commit()
+    return {"code": 200, "msg": "success", "data": {}}
+
+
+@eight_dim_router.post("/wall/posts/{post_id}/like")
+async def like_post(
+    post_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await db.execute(text("""
+        UPDATE wall_posts SET likes = likes + 1
+        WHERE post_id = CAST(:pid AS uuid)
+    """), {"pid": post_id})
+    await db.commit()
+    return {"code": 200, "msg": "success", "data": {}}
 
 # ── 阶段能力证书 PDF ──────────────────────────────────────────────────────
 
@@ -1014,8 +1234,8 @@ _RUBRIC_PROMPT = (
     "评估学员回答。\n"
     "评分标准：{rubric}\n"
     "学员回答：{answer}\n"
-    '输出JSON：{{"score":0.8,"is_correct":true,'
-    '"feedback":"评价","key_points_hit":[],"key_points_missed":[]}}\n'
+    '输出JSON：{"score":0.8,"is_correct":true,'
+    '"feedback":"评价","key_points_hit":[],"key_points_missed":[]}\n'
     "score>=0.6则is_correct为true。"
 )
 
@@ -1047,3 +1267,4 @@ async def rubric_check(
     except Exception as e:
         logger.warning("rubric check failed", error=str(e))
     return {"code": 200, "msg": "success", "data": result}
+# hot reload test

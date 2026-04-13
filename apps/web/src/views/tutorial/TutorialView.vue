@@ -141,6 +141,12 @@
               </div>
             </div>
 
+            <WallSection
+              v-if="currentChapter"
+              :chapter-id="currentChapter.chapter_id"
+              :topic-key="topicKey"
+            />
+
             <div class="social-section">
               <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
                 <span class="section-label">同学笔记</span>
@@ -289,6 +295,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
 import { learnerApi, knowledgeApi, tutorialApi, recommendApi, errorPatternApi, certificateApi } from '@/api'
+import WallSection from '@/components/WallSection.vue'
 
 async function getNewApis() {
   const mod = await import('@/api')
@@ -399,7 +406,12 @@ async function loadTutorial() {
     if (res.code === 200) {
       tutorial.value = res.data
       const list = chapterList.value
-      if (list.length) selectChapter(list[0])
+      if (list.length) {
+        const lastId = localStorage.getItem('last_chapter_id')
+        const target = lastId ? list.find((c: any) => c.chapter_id === lastId) : null
+        selectChapter(target || list[0])
+        if (target) localStorage.removeItem('last_chapter_id')
+      }
     }
   } finally { loading.value = false }
 }
@@ -442,7 +454,7 @@ async function markChapter(chapter: any, newStatus: string) {
     tutorial_id:      tutorial.value.tutorial_id || tutorial.value.blueprint_id || '',
     chapter_id:       chapter.chapter_id,
     completed:        status === 'read',
-    status:           status || 'read',
+    status:           status ?? 'unread',
     duration_seconds: durationSec,
   })
   if (status) {
@@ -495,6 +507,9 @@ async function downloadCert() {
 }
 
 function goChat() {
+  if (currentChapter.value?.chapter_id) {
+    localStorage.setItem('last_chapter_id', currentChapter.value.chapter_id)
+  }
   router.push({ path: '/chat', query: {
     topic: topicKey.value,
     chapter_id: currentChapter.value?.chapter_id || '',

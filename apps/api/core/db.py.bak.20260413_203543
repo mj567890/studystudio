@@ -22,7 +22,7 @@ engine = create_async_engine(
     pool_pre_ping=True,
     pool_size=CONFIG.database.pool_size,
     max_overflow=CONFIG.database.max_overflow,
-    echo=False,  # SQL echo 噪音太大，需要时改回 CONFIG.debug
+    echo=CONFIG.debug,
 )
 
 

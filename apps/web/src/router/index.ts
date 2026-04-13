@@ -32,6 +32,7 @@ const router = createRouter({
         { path: 'users',      component: () => import('@/views/admin/UsersView.vue') },
         { path: 'knowledge',  component: () => import('@/views/admin/KnowledgeView.vue') },
         { path: 'config',     component: () => import('@/views/admin/ConfigView.vue') },
+        { path: 'ai-config',  component: () => import('@/views/admin/AiConfigView.vue') },
       ]
     },
     { path: '/:pathMatch(.*)*', redirect: '/' }

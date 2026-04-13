@@ -486,15 +486,6 @@ async def review_entity(
     await db.commit()
     logger.info("Entity reviewed", entity_id=req.entity_id, action=req.action,
                 reviewer=current_user["user_id"])
-
-    # Phase 1 hook：approved 后触发 embedding 生成
-    if status == "approved":
-        try:
-            from apps.api.tasks.embedding_tasks import embed_single_entity
-            embed_single_entity.apply_async(args=[req.entity_id], queue="knowledge")
-        except Exception as _e:
-            logger.warning("dispatch embedding failed", entity_id=req.entity_id, error=str(_e))
-
     return {"code": 200, "msg": "success", "data": {"entity_id": req.entity_id, "status": status}}
 
 
@@ -527,18 +518,6 @@ async def review_entities_batch(
         action=req.action,
         reviewer=current_user["user_id"],
     )
-
-    # Phase 1 hook：批量 approved 后逐个派发 embedding 任务
-    if status == "approved":
-        try:
-            from apps.api.tasks.embedding_tasks import embed_single_entity
-            for eid in req.entity_ids:
-                embed_single_entity.apply_async(args=[eid], queue="knowledge")
-            logger.info("embedding tasks dispatched after batch review",
-                        count=len(req.entity_ids))
-        except Exception as _e:
-            logger.warning("dispatch embedding (batch) failed", error=str(_e))
-
     return {"code": 200, "msg": "success", "data": {"count": len(req.entity_ids), "status": status}}
 
 

@@ -40,6 +40,7 @@ from apps.api.modules.routers import (
     tutorial_router,
 )
 from apps.api.modules.admin.router import router as admin_router
+from apps.api.modules.admin.ai_config_router import router as ai_config_router
 from apps.api.modules.skill_blueprint.router import router as blueprint_router
 from apps.api.modules.learner.eight_dim_endpoints import eight_dim_router
 
@@ -78,6 +79,7 @@ def create_app() -> FastAPI:
     app.include_router(tutorial_router)
     app.include_router(teaching_router)
     app.include_router(admin_router)
+    app.include_router(ai_config_router)
     app.include_router(blueprint_router)
     app.include_router(eight_dim_router)
 

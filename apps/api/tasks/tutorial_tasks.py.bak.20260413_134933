@@ -48,7 +48,6 @@ celery_app.conf.update(
         "apps.api.tasks.blueprint_tasks",
         "apps.api.tasks.knowledge_tasks",
         "apps.api.tasks.auto_review_tasks",
-        "apps.api.tasks.embedding_tasks",
     ],
     task_routes = {
         "apps.api.tasks.tutorial_tasks.generate_skeleton":        {"queue": "tutorial"},
@@ -58,8 +57,6 @@ celery_app.conf.update(
         "apps.api.tasks.knowledge_tasks.run_ingest":              {"queue": "knowledge"},
         "apps.api.tasks.knowledge_tasks.run_extraction":          {"queue": "knowledge"},
         "apps.api.tasks.auto_review_tasks.auto_review_entities":  {"queue": "knowledge"},
-        "apps.api.tasks.embedding_tasks.embed_single_entity":     {"queue": "knowledge"},
-        "apps.api.tasks.embedding_tasks.backfill_entity_embeddings": {"queue": "knowledge"},
     }
 )
 

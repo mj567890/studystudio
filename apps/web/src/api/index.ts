@@ -301,3 +301,19 @@ export const certificateApi = {
       responseType: 'blob',
     }),
 }
+
+// 学习墙
+export const wallApi = {
+  list:    (params: { chapter_id?: string; topic_key?: string; post_type?: string; status?: string }) =>
+    http.get('/wall/posts', { params }),
+  create:  (data: { chapter_id: string; topic_key: string; post_type: string; content: string }) =>
+    http.post('/wall/posts', data),
+  replies: (postId: string) =>
+    http.get(`/wall/posts/${postId}/replies`),
+  reply:   (postId: string, content: string) =>
+    http.post(`/wall/posts/${postId}/replies`, { content }),
+  resolve: (postId: string) =>
+    http.post(`/wall/posts/${postId}/resolve`, {}),
+  like:    (postId: string) =>
+    http.post(`/wall/posts/${postId}/like`, {}),
+}

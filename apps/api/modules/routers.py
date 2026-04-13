@@ -123,6 +123,7 @@ class ChapterProgressRequest(BaseModel):
     tutorial_id: str
     chapter_id:  str
     completed:        bool
+    status:           str = "unread"
     duration_seconds: int = 0
 
 
@@ -137,21 +138,23 @@ async def mark_chapter_progress(
     await db.execute(
         _text("""
             INSERT INTO chapter_progress
-              (user_id, tutorial_id, chapter_id, completed, completed_at, duration_seconds)
+              (user_id, tutorial_id, chapter_id, completed, completed_at, duration_seconds, status)
             VALUES
-              (:uid, :tid, :chid, :done, CASE WHEN :done THEN NOW() ELSE NULL END, :dur)
+              (:uid, :tid, :chid, :done, CASE WHEN :done THEN NOW() ELSE NULL END, :dur, :status)
             ON CONFLICT (user_id, tutorial_id, chapter_id)
             DO UPDATE SET
               completed        = EXCLUDED.completed,
               completed_at     = EXCLUDED.completed_at,
+              status           = EXCLUDED.status,
               duration_seconds = GREATEST(chapter_progress.duration_seconds, EXCLUDED.duration_seconds)
         """),
         {
-            "uid":  current_user["user_id"],
-            "tid":  req.tutorial_id,
-            "chid": req.chapter_id,
-            "done": req.completed,
-            "dur":  getattr(req, "duration_seconds", 0),
+            "uid":    current_user["user_id"],
+            "tid":    req.tutorial_id,
+            "chid":   req.chapter_id,
+            "done":   req.completed,
+            "dur":    getattr(req, "duration_seconds", 0),
+            "status": req.status,
         }
     )
     await db.commit()

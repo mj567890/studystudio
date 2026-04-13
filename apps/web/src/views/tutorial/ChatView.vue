@@ -385,7 +385,7 @@ onMounted(async () => {
     await newConversation()
     // 如果从教程页跳转且带有章节信息，自动发送章节提示
     if (chapterTitle.value && conversationId.value) {
-      await sendMessage(`我刚刚学习了「${chapterTitle.value}」这一章节，请针对这个章节的内容帮我解答问题。`)
+      inputText.value = `我刚刚学习了「${chapterTitle.value}」这一章节，请针对这个章节的内容帮我解答问题。`
     }
   }
 })

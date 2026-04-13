@@ -28,7 +28,7 @@ BLUEPRINT_SYNTHESIS_PROMPT = """你是课程设计师。根据技能信号设计
 {skill_signal_json}
 
 严格要求：
-- 章节总数 = ceil(知识点总数 / 4)，最少2章最多12章；阶段数 = ceil(章节总数 / 3)，最少2个阶段
+- 章节总数 = ceil(知识点总数 / 6)，最少4章最多20章；阶段数 = ceil(章节总数 / 4)，最少2个阶段
 - 章节标题必须是动词短语（如"识别SQL注入点"）
 - 阶段类型只选：foundation、practice、defense 之一
 - 每章 related_entities 最多 2 个，名称必须从【知识点列表】中完全照抄，不得修改
@@ -126,7 +126,7 @@ async def _synthesize_blueprint_async(topic_key: str, space_id) -> None:
             text("SELECT entity_id::text, canonical_name, entity_type, short_definition "
                  "FROM knowledge_entities "
                  "WHERE space_id = CAST(:sid AS uuid) AND review_status = 'approved' "
-                 "ORDER BY is_core DESC, canonical_name LIMIT 15"),
+                 "ORDER BY is_core DESC, canonical_name LIMIT 80"),
             {"sid": space_id}
         )
         entities = [dict(r._mapping) for r in ents.fetchall()]
@@ -216,6 +216,14 @@ async def _synthesize_blueprint_async(topic_key: str, space_id) -> None:
                 space_id=space_id,
             )
             logger.info("Blueprint record created", blueprint_id=blueprint_id)
+
+            # 防止重复触发导致 stages/chapters 叠加：写入新批次前先清空旧批次
+            # (skill_chapters、chapter_entity_links 靠 CASCADE 连带删除)
+            await session.execute(
+                text("DELETE FROM skill_stages WHERE blueprint_id = CAST(:bid AS uuid)"),
+                {"bid": blueprint_id}
+            )
+            logger.info("Cleared previous stages/chapters", blueprint_id=blueprint_id)
 
             for stage_order, stage_data in enumerate(blueprint_data["stages"], start=1):
                 stage_type = stage_data.get("type", "foundation")
