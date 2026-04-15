@@ -144,9 +144,6 @@ def synthesize_blueprint(self, topic_key: str, space_id):
     use_v2 = os.environ.get("BLUEPRINT_V2_ENABLED", "").lower() in ("1", "true", "yes")
     version = "V2" if use_v2 else "V1"
     logger.info("synthesize_blueprint start", topic_key=topic_key, version=version)
-    # FIX(gwloop): 每次 task 重置 LLMGateway 单例，避免 asyncio.Lock / 连接池绑旧 loop
-    import apps.api.core.llm_gateway as _gw_mod
-    _gw_mod._llm_gateway = None
     try:
         if use_v2:
             asyncio.run(_synthesize_blueprint_v2_async(topic_key, space_id))

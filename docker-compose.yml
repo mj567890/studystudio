@@ -100,6 +100,7 @@ services:
       - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com/v1}
       - LLM_DEFAULT_MODEL=${LLM_DEFAULT_MODEL:-gpt-4o}
       - PYTHONPATH=/app
+      - BLUEPRINT_V2_ENABLED=true
     depends_on: [api, rabbitmq, postgres]
     volumes:
       - ./apps/api:/app/apps/api
