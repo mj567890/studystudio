@@ -1,0 +1,179 @@
+# docker-compose.yml（开发/测试环境）
+# 生产环境请使用 docker-compose.prod.yml
+
+# 禁用 BuildKit，确保构建时正确使用 daemon.json 中配置的镜像源
+# BuildKit 默认不读取镜像源配置，会导致拉取基础镜像失败
+x-build-env: &build-env
+  DOCKER_BUILDKIT: "0"
+
+services:
+  # ── 前端 ──────────────────────────────────────────────────────
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile.web
+    ports: ["3000:3000"]
+    depends_on: [api]
+
+  # ── 后端 API ──────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    ports: ["8000:8000"]
+    environment:
+      - APP_ENV=development
+      - APP_DEBUG=true
+      - DATABASE_URL=postgresql+asyncpg://user:pass@postgres:5432/adaptive_learning
+      - REDIS_URL=redis://redis:6379
+      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672/
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=adaptive-learning
+      - JWT_SECRET_KEY=dev-secret-change-in-prod
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - AI_CONFIG_ENCRYPTION_KEY=${AI_CONFIG_ENCRYPTION_KEY}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      - LLM_DEFAULT_MODEL=${LLM_DEFAULT_MODEL:-gpt-4o}
+      - PYTHONPATH=/app
+    volumes:
+      - ./apps/api:/app/apps/api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_started
+
+  # ── Celery ────────────────────────────────────────────────────
+  celery_worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    command: celery -A apps.api.tasks.tutorial_tasks.celery_app worker
+             --loglevel=info --concurrency=4 --queues=tutorial,low_priority
+             --without-heartbeat --without-mingle --without-gossip
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://user:pass@postgres:5432/adaptive_learning
+      - REDIS_URL=redis://redis:6379
+      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672/
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - AI_CONFIG_ENCRYPTION_KEY=${AI_CONFIG_ENCRYPTION_KEY}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      - LLM_DEFAULT_MODEL=${LLM_DEFAULT_MODEL:-gpt-4o}
+      - PYTHONPATH=/app
+    volumes:
+      - ./apps/api:/app/apps/api
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A apps.api.tasks.tutorial_tasks.celery_app inspect ping --timeout 8 2>&1 | grep -q pong"]
+      interval: 30s
+      timeout: 15s
+      start_period: 60s
+      retries: 5
+
+  celery_worker_knowledge:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    command: celery -A apps.api.tasks.tutorial_tasks.celery_app worker
+             --loglevel=info --concurrency=4 --queues=knowledge
+             --without-heartbeat --without-mingle --without-gossip
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://user:pass@postgres:5432/adaptive_learning
+      - REDIS_URL=redis://redis:6379
+      - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672/
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - AI_CONFIG_ENCRYPTION_KEY=${AI_CONFIG_ENCRYPTION_KEY}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      - LLM_DEFAULT_MODEL=${LLM_DEFAULT_MODEL:-gpt-4o}
+      - PYTHONPATH=/app
+      - BLUEPRINT_V2_ENABLED=true
+    depends_on: [api, rabbitmq, postgres]
+    volumes:
+      - ./apps/api:/app/apps/api
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A apps.api.tasks.tutorial_tasks.celery_app inspect ping --timeout 8 2>&1 | grep -q pong"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 60s
+
+  celery_beat:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    command: celery -A apps.api.tasks.tutorial_tasks.celery_app beat --loglevel=info
+    depends_on: [api, rabbitmq]
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import os,sys; found=any(b'beat' in open('/proc/'+p+'/cmdline','rb').read() for p in os.listdir('/proc') if p.isdigit()); sys.exit(0 if found else 1)\"  "]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  # ── 数据库 ────────────────────────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg15
+    ports: ["5432:5432"]
+    environment:
+      POSTGRES_DB:       adaptive_learning
+      POSTGRES_USER:     user
+      POSTGRES_PASSWORD: pass
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations/001_initial_schema.sql:/docker-entrypoint-initdb.d/001_schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d adaptive_learning"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7.2-alpine
+    ports: ["6379:6379"]
+    volumes: [redis_data:/data]
+
+  rabbitmq:
+    image: rabbitmq:3.12-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    volumes: [rabbitmq_data:/var/lib/rabbitmq]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER:     minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    volumes: [minio_data:/data]
+
+volumes:
+  postgres_data:
+  redis_data:
+  rabbitmq_data:
+  minio_data:

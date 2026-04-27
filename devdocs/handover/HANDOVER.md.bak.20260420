@@ -1,0 +1,192 @@
+# StudyStudio 会话交接文档
+
+**生成日期：** 2026-04-19
+**上次会话主题：** 产品语言统一 + 菜单重构 + Phase 1/2 开发（上传简化 + 公开广场）
+
+---
+
+## 一、历史完成工作（已稳定）
+
+### Phase 1~4、账号管理、测验系统、Worker稳定性（略，见旧文档备份）
+
+### 本次会话完成
+
+#### 菜单与命名体系重构
+- 去掉菜单序号（①②③④⑤），消除"强制流程"暗示
+- 统一命名：知识空间→我的课程、教程中心→学习、知识漏洞→薄弱环节、上传资料→资料库、知识库推荐→发现课程、生成路径→我的学习路径
+- 个人中心合并到账号设置，删除重复入口
+- 定位自检从菜单删除（方向 A：功能联动存在但用户感知不到，不如不引导）
+
+#### 上传流程简化（Phase 1）
+- 去掉上传时"公开/私人"选择，创建即私人
+- 上传成功后跳转改为"我的课程"，不再引导去"生成路径"
+- 清掉 canUseGlobal 死代码
+
+#### space_type 概念清理
+- 管理员不再负责课程，space_type 对用户完全隐藏
+- SpacesView 删掉"类型"列，只保留"可见性"列
+- SpaceDetailView 删掉类型行、推荐到社区入口及相关死代码
+- canFork 逻辑改为只看 visibility（public/shared），不再判断 space_type
+- 数据库：将唯一一条 global 空间（网络安全）改为 personal，删除测试空间及其 blueprint
+- 后端接口去掉 space_type != 'global' 过滤
+
+#### 公开广场（Phase 2）
+- 后端新增 GET /api/spaces/public：返回所有 visibility=public 课程
+- 后端新增 POST /api/spaces/{space_id}/join-public：公开课程无需邀请码直接加入
+- SpaceDetailView 可见性下拉加"公开（出现在发现页）"选项
+- CommunityView 完全重写为发现课程广场：卡片展示、已加入显示"继续学习"、未加入一键加入
+- 路由顺序修复：/spaces/public 必须在 /spaces/{space_id} 之前注册（否则 422）
+
+---
+
+## 二、关键 Bug 修复
+
+### GET /api/spaces/public 返回 422
+原因：路由注册顺序错误，public 被 {space_id} UUID 参数捕获。
+修复：将 /spaces/public 路由移到 /spaces/{space_id} 之前，与 /spaces/join 同理。
+
+### 网络安全课程不出现在发现页
+原因：space_type=global 被接口过滤排除。
+修复：数据库改 space_type=personal，接口去掉 space_type 过滤。
+
+### 删除 global 空间报外键约束错误
+原因：skill_blueprints.space_id 有非空约束，ON DELETE SET NULL 触发约束违反。
+修复：先删 blueprint 再删 space。
+
+---
+
+## 三、待开发
+
+### Phase 3a：课程讨论区（下次会话开始）
+
+#### 产品逻辑
+- 每门课程（space）有一个讨论区
+- 帖子可以绑定到某个章节，也可以是全局讨论
+- 帖子有类型标签：笔记 / 求助 / 讨论
+- 支持回复帖子（一层，不做无限嵌套）
+- 入口：学习页章节旁有"讨论"按钮；侧边栏"讨论"菜单聚合所有课程
+
+#### 需要新建的数据表
+
+```sql
+CREATE TABLE course_posts (
+    post_id       UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    space_id      UUID NOT NULL REFERENCES knowledge_spaces(space_id) ON DELETE CASCADE,
+    chapter_id    UUID REFERENCES skill_chapters(chapter_id) ON DELETE SET NULL,
+    user_id       UUID NOT NULL REFERENCES users(user_id),
+    post_type     VARCHAR(20) NOT NULL DEFAULT 'discussion'
+                  CHECK (post_type IN ('note', 'question', 'discussion')),
+    title         VARCHAR(255),
+    content       TEXT NOT NULL,
+    reply_count   INT NOT NULL DEFAULT 0,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE course_post_replies (
+    reply_id    UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    post_id     UUID NOT NULL REFERENCES course_posts(post_id) ON DELETE CASCADE,
+    user_id     UUID NOT NULL REFERENCES users(user_id),
+    content     TEXT NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_course_posts_space ON course_posts(space_id, created_at DESC);
+CREATE INDEX idx_course_posts_chapter ON course_posts(chapter_id) WHERE chapter_id IS NOT NULL;
+CREATE INDEX idx_course_post_replies_post ON course_post_replies(post_id, created_at ASC);
+```
+
+#### 后端接口规划
+
+GET    /api/spaces/{space_id}/posts        获取课程讨论列表（可按 chapter_id 过滤）
+POST   /api/spaces/{space_id}/posts        发帖
+GET    /api/posts/{post_id}/replies        获取帖子回复
+POST   /api/posts/{post_id}/replies        回复帖子
+DELETE /api/posts/{post_id}               删除帖子（本人或 owner）
+DELETE /api/replies/{reply_id}            删除回复（本人或 owner）
+
+#### 前端页面规划
+
+讨论区页面（/spaces/{space_id}/posts）：
+- 顶部：发帖按钮 + 类型筛选（全部/笔记/求助/讨论）+ 章节筛选下拉
+- 帖子列表：标题、类型标签、作者、时间、回复数
+- 点击帖子：展开回复列表 + 回复输入框
+
+学习页（TutorialView）集成：
+- 每个章节旁加"讨论"按钮
+- 点击跳转到该章节筛选后的讨论页
+
+侧边栏新增"讨论"菜单项：
+- 路由 /discuss
+- 聚合我加入的所有课程的最新帖子（Phase 3b）
+
+#### 开发顺序
+1. 建表（migration SQL）
+2. 后端接口（space/router.py 追加）
+3. 前端讨论区页面（新建 PostsView.vue）
+4. TutorialView 加章节讨论入口
+5. 路由注册（router/index.ts）
+6. 侧边栏加入口（LayoutView.vue）
+
+### Phase 3b：全局聚合（Phase 3a 之后）
+- 全局动态页：我加入的所有课程的新帖子聚合
+- 回复消息通知
+
+---
+
+## 四、关键决策与惯例（每次会话必读）
+
+### 4.1 asyncpg cast 写法
+所有 raw SQL 参数类型转换用 CAST(:x AS uuid)，不用 :x::uuid。
+
+### 4.2 asyncpg IS NULL 写法
+在 Python 层判断，生成两条不同 SQL。
+
+### 4.3 鉴权原则
+global space 对所有登录用户开放。personal/course space 必须通过 SpaceService.require_space_access。
+
+### 4.4 space_members owner 记录
+space 创建时必须写 role=owner 记录。
+
+### 4.5 Celery 任务规范
+- 任务体必须是同步函数，内部用 asyncio.run() 执行异步逻辑
+- 新增任务必须在 task_routes 中注册队列
+- knowledge 队列任务必须加 --prefetch-multiplier=1
+- beat_schedule 必须单独赋值，不能放在 conf.update() 里
+
+### 4.6 前端构建部署流程
+cd ~/studystudio/apps/web && npm run build
+cd ~/studystudio && docker compose cp apps/web/dist/. web:/usr/share/nginx/html/
+docker compose restart api   # 后端有改动时执行
+
+### 4.7~4.25 见旧 HANDOVER.md 备份
+
+### 4.26 路由注册顺序规范
+固定路径段必须在路径参数之前注册。例：
+- /spaces/public 必须在 /spaces/{space_id} 之前
+- /spaces/join 已有注释说明，同理
+新增固定子路径时务必检查顺序。
+
+### 4.27 space_type 字段规范
+space_type 是内部字段，前端不展示。所有用户可见的权限/可见性逻辑统一走 visibility 字段（private/shared/public）。后端数据库保留 space_type 兼容历史数据，但新接口过滤条件不再使用它。
+
+### 4.28 删除 space 的正确顺序
+skill_blueprints.space_id 有非空约束。删除 space 前必须先删除其关联的 skill_blueprints，否则外键 SET NULL 会触发非空约束报错。
+
+### 4.29 公开课程加入接口
+POST /api/spaces/{space_id}/join-public：无需邀请码，检查 visibility=public 后直接写入 space_members。非公开课程返回 403。
+
+---
+
+## 五、当前数据库 space 状态
+
+所有 space 均为 personal 类型，无 global 空间残留：
+- python编程：public
+- 网络安全：public
+- 其余均为 private
+
+---
+
+## 六、下次会话如何开始
+
+说"开始 Phase 3a 课程讨论区"，先给勘察脚本查现有表结构，再建表和写接口。

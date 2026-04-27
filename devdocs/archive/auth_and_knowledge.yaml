@@ -1,0 +1,301 @@
+openapi: 3.0.3
+info:
+  title: 自适应学习平台 API
+  version: 1.0.0
+  description: Block A（身份认证）+ Block B（知识库）接口契约
+
+servers:
+  - url: https://api.your-domain.com
+    description: 生产环境
+  - url: http://localhost:8000
+    description: 开发环境
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    StandardResponse:
+      type: object
+      properties:
+        code:     { type: integer }
+        msg:      { type: string }
+        data:     { type: object }
+        trace_id: { type: string }
+
+    ErrorResponse:
+      type: object
+      properties:
+        code: { type: integer }
+        msg:  { type: string }
+        detail:
+          type: object
+          properties:
+            code: { type: string }
+            msg:  { type: string }
+
+    UserInfo:
+      type: object
+      properties:
+        user_id:    { type: string, format: uuid }
+        email:      { type: string, format: email }
+        nickname:   { type: string }
+        avatar_url: { type: string, nullable: true }
+        status:     { type: string, enum: [active, disabled] }
+        roles:      { type: array, items: { type: string } }
+        created_at: { type: string, format: date-time }
+
+    FileInfo:
+      type: object
+      properties:
+        file_id:     { type: string, format: uuid }
+        file_name:   { type: string }
+        file_size:   { type: integer }
+        storage_url: { type: string }
+        is_duplicate:{ type: boolean }
+
+paths:
+  # ── Block A：身份认证 ──────────────────────────────────────
+  /api/auth/register:
+    post:
+      summary: 用户注册
+      tags: [Block A - 身份认证]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, nickname]
+              properties:
+                email:    { type: string, format: email }
+                password: { type: string, minLength: 8 }
+                nickname: { type: string, minLength: 1, maxLength: 100 }
+            example:
+              email: user@example.com
+              password: mypassword123
+              nickname: 学习者小明
+      responses:
+        '201':
+          description: 注册成功
+          content:
+            application/json:
+              example:
+                code: 201
+                msg: success
+                data:
+                  user_id: "550e8400-e29b-41d4-a716-446655440000"
+                  email: user@example.com
+                  nickname: 学习者小明
+        '400':
+          description: 邮箱已注册
+          content:
+            application/json:
+              example:
+                code: 400
+                msg: bad request
+                detail: { code: AUTH_003, msg: Email already registered }
+
+  /api/auth/login:
+    post:
+      summary: 用户登录
+      tags: [Block A - 身份认证]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:    { type: string, format: email }
+                password: { type: string }
+            example:
+              email: user@example.com
+              password: mypassword123
+      responses:
+        '200':
+          description: 登录成功，返回 JWT Token
+          content:
+            application/json:
+              example:
+                code: 200
+                msg: success
+                data:
+                  access_token: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                  token_type: bearer
+                  roles: [learner]
+        '401':
+          description: 凭证无效
+          content:
+            application/json:
+              example:
+                code: 401
+                msg: unauthorized
+                detail: { code: AUTH_001, msg: Invalid credentials }
+
+  /api/users/me:
+    get:
+      summary: 获取当前用户信息
+      tags: [Block A - 身份认证]
+      security: [{ BearerAuth: [] }]
+      responses:
+        '200':
+          description: 用户信息
+          content:
+            application/json:
+              example:
+                code: 200
+                msg: success
+                data:
+                  user_id: "550e8400-e29b-41d4-a716-446655440000"
+                  email: user@example.com
+                  nickname: 学习者小明
+                  roles: [learner]
+                  created_at: "2026-04-03T10:00:00Z"
+
+  # ── Block A：文件上传 ──────────────────────────────────────
+  /api/files/upload:
+    post:
+      summary: 上传文件
+      description: |
+        支持 PDF、Word、Markdown、TXT 格式，最大 100MB。
+        SHA-256 去重：相同文件直接返回已有 file_id，不重复存储。
+        上传成功后自动触发文档解析流程（异步）。
+      tags: [Block A - 文件管理]
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: 文件内容
+                space_type:
+                  type: string
+                  enum: [global, course, personal]
+                  default: personal
+                  description: 知识空间类型
+                space_id:
+                  type: string
+                  format: uuid
+                  nullable: true
+                  description: 课程ID（space_type=course时必填）
+      responses:
+        '201':
+          description: 上传成功
+          content:
+            application/json:
+              example:
+                code: 201
+                msg: success
+                data:
+                  file_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+                  file_name: "PHP安全手册.pdf"
+                  file_size: 2048576
+                  storage_url: "http://minio:9000/adaptive-learning/files/..."
+                  is_duplicate: false
+        '413':
+          description: 文件过大
+          content:
+            application/json:
+              example:
+                code: 413
+                msg: payload too large
+                detail: { code: DOC_001, msg: File too large (max 100MB) }
+        '415':
+          description: 不支持的文件格式
+          content:
+            application/json:
+              example:
+                code: 415
+                msg: unsupported media type
+                detail: { code: DOC_002, msg: "Unsupported file type: application/exe" }
+
+  # ── Block B：文档与知识 ────────────────────────────────────
+  /api/documents/ingest:
+    post:
+      summary: 触发文档解析（通常由系统自动触发，也支持手动调用）
+      tags: [Block B - 知识库]
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [file_id]
+              properties:
+                file_id:    { type: string, format: uuid }
+                space_type: { type: string, enum: [global, course, personal] }
+                space_id:   { type: string, format: uuid, nullable: true }
+            example:
+              file_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+              space_type: personal
+      responses:
+        '202':
+          description: 解析任务已触发（异步执行）
+          content:
+            application/json:
+              example:
+                code: 202
+                msg: accepted
+                data:
+                  document_id: "d8e8fca2-dc0f-4606-b2b5-dba6c7e2a8d7"
+                  status: parsing
+
+  /api/knowledge/subgraph:
+    post:
+      summary: 获取知识子图
+      description: 返回指定主题的知识实体和关系，用于构建教程骨架和学习路径。
+      tags: [Block B - 知识库]
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [topic_key]
+              properties:
+                topic_key:
+                  type: string
+                  description: 主题标识（如 php-file-include）
+                space_types:
+                  type: array
+                  items: { type: string }
+                  default: [global]
+                  description: 查询的知识空间范围
+            example:
+              topic_key: php-file-include
+              space_types: [global, personal]
+      responses:
+        '200':
+          description: 知识子图
+          content:
+            application/json:
+              example:
+                code: 200
+                msg: success
+                data:
+                  entities:
+                    - entity_id: "e1"
+                      canonical_name: 文件包含漏洞
+                      entity_type: concept
+                      domain_tag: php-security
+                      short_definition: 攻击者通过控制include参数包含任意文件
+                      is_core: true
+                  relations:
+                    - source_entity_id: "e2"
+                      target_entity_id: "e1"
+                      relation_type: prerequisite_of
+                  entity_count: 12
+                  relation_count: 8

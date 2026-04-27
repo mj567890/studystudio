@@ -1,0 +1,13 @@
+__pycache__
+*.pyc
+.git
+.env
+*.md
+*.bak.*
+devdocs
+docs
+tests
+apps/web
+apps/api/**/__pycache__
+.pytest_cache
+.ruff_cache

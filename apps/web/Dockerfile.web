@@ -1,0 +1,21 @@
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+# 配置 npm 使用国内镜像
+RUN npm config set registry https://registry.npmmirror.com
+
+COPY package.json ./
+RUN npm install
+
+COPY . .
+RUN npm run build
+
+# 生产阶段：nginx 托管静态文件
+FROM nginx:alpine
+# 安全审计 2026-04-27：nginx 默认以 nginx 用户运行（非 root），无需额外配置
+COPY --from=builder /app/dist /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+EXPOSE 3000
+# nginx unprivileged 用户运行在 8080 不可行，显式以 root 启动 nginx 后自动降权
+# nginx master 以 root 启动（绑定 3000），worker 以 nginx 用户运行

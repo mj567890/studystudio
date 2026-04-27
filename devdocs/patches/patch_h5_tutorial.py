@@ -1,0 +1,134 @@
+"""
+在服务器 ~/studystudio 目录下执行：
+python3 patch_h5_tutorial.py
+"""
+from pathlib import Path
+
+p = Path("apps/web/src/views/tutorial/TutorialView.vue")
+src = p.read_text()
+
+# ── 1. 模板：在 social-section 之后插入推荐区块 ───────────────────────────
+TEMPLATE_ANCHOR = """            <div class="social-section">"""
+
+TEMPLATE_INSERT = """            <!-- H-5 关联知识推荐 -->
+            <div v-if="relatedRecs.length" class="related-section">
+              <p class="section-label">完成此章节后，推荐继续学习</p>
+              <div class="related-list">
+                <div
+                  v-for="rec in relatedRecs" :key="rec.chapter_id"
+                  class="related-card"
+                  @click="jumpToRec(rec)"
+                >
+                  <div class="related-card-top">
+                    <span class="related-chapter">{{ rec.chapter_title }}</span>
+                    <el-tag type="info" size="small" effect="plain">{{ rec.stage_title }}</el-tag>
+                  </div>
+                  <div class="related-unlock">
+                    <span class="related-key">{{ rec.source_name }}</span>
+                    <span class="related-arrow"> → </span>
+                    <span class="related-target">{{ rec.target_name }}</span>
+                  </div>
+                  <div v-if="rec.target_def" class="related-def">{{ rec.target_def }}</div>
+                </div>
+              </div>
+            </div>
+
+"""
+
+# ── 2. script：import 中加 recommendApi ────────────────────────────────────
+IMPORT_ANCHOR = "import { learnerApi, knowledgeApi, tutorialApi } from '@/api'"
+IMPORT_NEW    = "import { learnerApi, knowledgeApi, tutorialApi, recommendApi } from '@/api'"
+
+# ── 3. script：在 ref 声明区加 relatedRecs ─────────────────────────────────
+REF_ANCHOR = "const loading      = ref(false)"
+REF_INSERT  = "const relatedRecs  = ref<any[]>([])\n"
+
+# ── 4. script：markChapter 成功后加载推荐 ──────────────────────────────────
+MARK_ANCHOR = "    ElMessage.success(status==='read' ? '已标记为已读' : '已标记为忽略')"
+MARK_INSERT = """    if (status === 'read') {
+      relatedRecs.value = []
+      try {
+        const res: any = await recommendApi.getRelated(chapter.chapter_id)
+        relatedRecs.value = res.data?.recommendations || []
+      } catch { /* 推荐加载失败不阻断主流程 */ }
+    } else {
+      relatedRecs.value = []
+    }
+"""
+
+# ── 5. script：jumpToRec 函数（加在 markChapter 附近） ────────────────────
+JUMP_ANCHOR = "async function markChapter"
+JUMP_INSERT = """function jumpToRec(rec: any) {
+  // 找到目标章节并跳转
+  if (!tutorial.value) return
+  const allChapters = tutorial.value.source === 'blueprint'
+    ? tutorial.value.stages?.flatMap((s: any) => s.chapters) || []
+    : tutorial.value.chapter_tree || []
+  const target = allChapters.find((c: any) => c.chapter_id === rec.chapter_id)
+  if (target) selectChapter(target)
+}
+
+"""
+
+# ── 6. style：加推荐区块样式 ───────────────────────────────────────────────
+STYLE_ANCHOR = ".social-section {"
+STYLE_INSERT = """.related-section {
+  margin-top: 24px;
+  padding-top: 16px;
+  border-top: 1px solid #f0f0f0;
+}
+.related-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+.related-card {
+  background: #f0f7ff;
+  border: 1px solid #d0e8ff;
+  border-radius: 8px;
+  padding: 10px 14px;
+  cursor: pointer;
+  transition: background .15s;
+}
+.related-card:hover { background: #e0f0ff; }
+.related-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+.related-chapter { font-size: 13px; font-weight: 600; color: #1a6db5; }
+.related-unlock   { font-size: 12px; color: #606266; margin-bottom: 2px; }
+.related-key      { color: #409eff; font-weight: 500; }
+.related-arrow    { color: #909399; }
+.related-target   { color: #67c23a; font-weight: 500; }
+.related-def      { font-size: 11px; color: #909399; }
+
+"""
+
+errors = []
+
+def patch(content, anchor, replacement, mode="replace_anchor"):
+    if anchor not in content:
+        errors.append(f"  ✗ 未找到锚点: {anchor[:50]!r}")
+        return content
+    if mode == "prepend":
+        return content.replace(anchor, replacement + anchor)
+    return content.replace(anchor, replacement)
+
+# 按顺序打补丁
+src = patch(src, IMPORT_ANCHOR, IMPORT_NEW)
+src = patch(src, REF_ANCHOR,    REF_INSERT + REF_ANCHOR, "prepend")
+src = patch(src, MARK_ANCHOR,   MARK_ANCHOR + "\n" + MARK_INSERT)
+src = patch(src, JUMP_ANCHOR,   JUMP_INSERT + JUMP_ANCHOR, "prepend")
+src = patch(src, TEMPLATE_ANCHOR, TEMPLATE_INSERT + TEMPLATE_ANCHOR, "prepend")
+src = patch(src, STYLE_ANCHOR,  STYLE_INSERT + STYLE_ANCHOR, "prepend")
+
+if errors:
+    print("补丁部分失败：")
+    for e in errors:
+        print(e)
+else:
+    p.write_text(src)
+    print("✓ TutorialView.vue H-5 补丁全部应用成功")

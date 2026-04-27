@@ -1,0 +1,19 @@
+{
+  "created_at": "2026-04-08T05:40:27.199395",
+  "files": [
+    "apps/api/modules/tutorial/tutorial_service.py",
+    "apps/api/modules/learner/learner_service.py",
+    "apps/api/modules/teaching/teaching_service.py",
+    "apps/web/src/views/tutorial/TutorialView.vue",
+    "apps/web/src/views/admin/KnowledgeView.vue"
+  ],
+  "created_new": [
+    "apps/api/modules/skill_blueprint/__init__.py",
+    "apps/api/modules/skill_blueprint/schemas.py",
+    "apps/api/modules/skill_blueprint/repository.py",
+    "apps/api/modules/skill_blueprint/service.py",
+    "apps/api/modules/tutorial/router.py",
+    "apps/web/src/api/skillBlueprint.ts",
+    "ops/skill_blueprint_migration.sql"
+  ]
+}

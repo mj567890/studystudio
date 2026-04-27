@@ -1,0 +1,283 @@
+# StudyStudio 会话交接文档
+
+**生成日期：** 2026-04-19
+**上次会话主题：** 测验系统 + AI批改 + 上传体验 + Worker稳定性 + 新用户体验重构 + Beat修复
+
+---
+
+## 一、历史完成工作（已稳定）
+
+### Phase 1~4（略，见旧文档）
+
+### 账号管理功能
+- POST /api/users/me/avatar：头像上传到 MinIO
+- DELETE /api/users/me：账号注销软删除，Migration 010
+
+### 测验系统完善
+- 章节标题旁"📝 做测验"按钮，完成后显示"🎉 已完成"标签
+- 测验得分 ≥ 60 自动标记章节已读，联动 mastery_score 更新
+- 提交后显示答题回顾（每题对错 + 正确答案 + 解析，支持滚动）
+- 得分 < 60 时显示"仍然标记已读"选项
+- 页面加载时立即拉取进度，刷新后侧边栏立即显示 ✓
+- blueprint 发布后异步预生成章节测验题（pregen_chapter_quizzes）
+- QUIZ_GENERATION_PROMPT 加入 ai_rubric 字段
+- AI 批改三重修复（见第二节）
+
+### 上传页体验改进
+- 处理流程步骤条（4个阶段图标+连接线）
+- 各阶段进度提示：排队中动画条、解析中片段数、审核中 approved/total 进度条
+- 文件大小动态估算处理时间
+- 按钮"查看"改为"打开原文"
+- 下拉列表显示所有课程（不按 spaceType 过滤）
+- getDomains 接口实体数量从硬编码 0 改为真实查询
+
+### Worker 稳定性修复（重要）
+- 去掉 `--without-heartbeat`，改为 `--heartbeat-interval=10`
+- celery_worker_knowledge 加 `--prefetch-multiplier=1`
+- RabbitMQ 加 `consumer_timeout=28800000`（8小时）
+- celery_worker_knowledge 加 `restart: unless-stopped`
+- 新增 `resume_pending_review` 定时任务：每 5 分钟由 beat 触发，自动续接中断的审核链
+
+### 章节内容质量提升
+- CHAPTER_CONTENT_PROMPT 字数要求：500字 → 600-900字
+- 新增 `code_example` JSON 字段，LLM 输出带行注释的代码示例
+- asyncio.wait_for 超时：90s → 150s
+- llm_gateway.py 按 model_route 区分超时（长路由 120s，其他 30s）
+- TutorialView 新增代码示例渲染块
+
+### 课程管理 Web 页面（/admin/courses）
+- 查看所有课程内容完整度、按 stage 浏览章节、单章重生成、全量批量重生成
+- 4 个新接口，新 Celery 任务 regenerate_all_chapters
+- 辅助脚本：scripts/regen_chapter.py
+
+### 新用户体验重构（本次新增）
+- **首页课程卡片化**：下拉框改为卡片网格，点击选课，显示知识点数和类型
+- **首页用户信息卡**：顶部显示头像、昵称、角色，快速入口账号设置
+- **账号设置页重设计**：删掉"快速操作"和"知识掌握概览"，编辑资料和修改密码改为页内表单（无弹窗）
+- **侧边栏"学习画像"改为"账号设置"**
+- **零输入上传**：文件选择后自动从文件名推断课程名，无需手填
+
+### beat 定时任务修复（本次新增，重要）
+- **根本原因**：celery_beat 容器没有 volumes 挂载，用的是镜像里的旧代码；也没有环境变量，broker URL 是 localhost 导致连接拒绝
+- **修复**：给 celery_beat 加 volumes 挂载和完整环境变量
+- **附加修复**：`beat_schedule` 不能放在 `conf.update()` 里，必须单独赋值 `celery_app.conf.beat_schedule = {}`
+- **验证**：beat 现在每 5 分钟正确触发 check_dlq 和 resume_pending_review
+
+### auto_review → blueprint 自动触发（本次新增）
+- `_finalize_documents` 里补发 synthesize_blueprint，审核完成后自动触发课程生成
+- `resume_pending_review` 补充 blueprint 巡检：检测到有 approved 实体但无 blueprint 的 space，自动触发生成
+
+### 系统监控增强（本次新增）
+- `/api/admin/health/blueprint-progress` 新接口：返回各 space 的课程生成阶段和进度
+- SystemHealthView 加"课程生成进度"卡片
+
+---
+
+## 二、本次会话 Bug 修复
+
+### GapScanService.scan 参数名不匹配
+SQL 里 `:user_id`，传参 `{"uid": user_id}` → 改为 `{"user_id": user_id}`
+
+### AI 批改固定 50 分（三重根因）
+1. `model_route="simple"` 不存在 → 改为 `teaching_chat_simple`
+2. prompt 用 `.format()` 但含大括号 → 改为 `.replace()`
+3. LLM 返回 `{{}}` 双大括号 → 解析前 unescape
+
+### getDomains 下拉列表为空
+SQL 硬编码 `0 AS entity_count`，dict 访问了 `row.approved_count` 导致异常 → 补全真实查询
+
+### auto_review_entities 任务链断裂
+worker 重启后 pending 实体永久停滞 → 加 `resume_pending_review` 定时巡检自动续接
+
+### celery_beat 不触发任务
+容器无 volumes 挂载（用旧镜像代码）+ 无环境变量（broker 连 localhost 失败）→ 加挂载和环境变量
+
+### beat_schedule 配置不生效
+`conf.update()` 不支持 beat_schedule → 改为 `celery_app.conf.beat_schedule = {}`
+
+---
+
+## 三、已验证完成
+
+- python编程课程：3095 知识点提取 → 2580 审核通过 → blueprint 生成（72 阶段，356 章）→ 页面正常展示
+- 上传→审核→生成→学习完整流程验证通过
+- beat 定时任务验证触发：check_dlq 和 resume_pending_review 均正常
+
+---
+
+## 四、关键决策与惯例（每次会话必读）
+
+### 4.1 asyncpg cast 写法
+所有 raw SQL 参数类型转换用 CAST(:x AS uuid)，不用 :x::uuid。
+
+### 4.2 asyncpg IS NULL 写法
+在 Python 层判断，生成两条不同 SQL。
+
+### 4.3 鉴权原则
+global space 对所有登录用户开放。personal/course space 必须通过 SpaceService.require_space_access。
+
+### 4.4 space_members owner 记录
+space 创建时必须写 role=owner 记录。
+
+### 4.5 Celery 任务规范
+- 任务体必须是同步函数，内部用 asyncio.run() 执行异步逻辑
+- 新增任务必须在 task_routes 中注册队列
+- knowledge 队列任务必须加 `--prefetch-multiplier=1`
+- **beat_schedule 必须单独赋值**，不能放在 conf.update() 里
+
+### 4.6 前端构建部署流程
+```bash
+cd ~/studystudio/apps/web && npm run build
+cd ~/studystudio && docker compose cp apps/web/dist/. web:/usr/share/nginx/html/
+docker compose restart api   # 后端有改动时执行
+```
+
+### 4.7 Phase 3 之后新接口规范
+所有涉及 topic_key 的接口必须同时接受 space_id query 参数并透传。
+
+### 4.8 resolve_space_id 使用原则
+仅在调用方完全没有 space_id 来源时使用。
+
+### 4.9 知识库推荐业务规则
+只有 global space + review_status=approved 的知识点可提交推荐。重复提交幂等：rejected 重置为 pending。
+
+### 4.10 密码强度校验规则
+至少 8 位，大写/小写/数字/特殊字符中至少三种。后端前端保持同步。
+
+### 4.11 axios 响应拦截器层级
+`res.data` = 实际 payload，不要写 `res.data.data`。
+
+### 4.12 账号软删除规则
+注销账号将 users.status 置为 'deleted'（Migration 010）。登录时 status != 'active' 即拒绝。
+
+### 4.13 头像上传规范
+接口：POST /api/users/me/avatar，multipart/form-data，MinIO 路径 `avatars/{user_id}.{ext}`，限 5MB。
+
+### 4.14 blueprint 就绪轮询规范
+上传成功后每 5 秒调 `GET /api/blueprints/{topic_key}/status`，最多 36 次（3分钟），超时标记失败。
+
+### 4.15 AI 批改 rubric 规范
+- rubric prompt 用 `.replace()` 不用 `.format()`
+- LLM 返回的 JSON 解析前先 unescape：`.replace("{{","{").replace("}}","}")`
+- score 强制 `float()` 转换，is_correct 用 `score >= 0.6`
+
+### 4.16 测验题目缓存规范
+题目存在 `chapter_quizzes` 表，blueprint 发布后由 `pregen_chapter_quizzes` 预生成。清空缓存：`DELETE FROM chapter_quizzes`。
+
+### 4.17 SQL 参数名必须一致
+SQL 里 `:user_id` 对应参数字典 key 必须是 `"user_id"`，不能用 `"uid"` 等别名。
+
+### 4.18 Worker 稳定性配置（重要，禁止违反）
+```yaml
+# celery_worker_knowledge
+command: ... --heartbeat-interval=10 --prefetch-multiplier=1
+restart: unless-stopped
+
+# celery_beat（必须有 volumes 和环境变量！）
+volumes:
+  - ./apps/api:/app/apps/api
+environment:
+  - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672/
+  - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+  - DATABASE_URL=postgresql+asyncpg://user:pass@postgres:5432/adaptive_learning
+  - REDIS_URL=redis://redis:6379
+  - PYTHONPATH=/app
+
+# rabbitmq
+environment:
+  RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "-rabbit consumer_timeout 28800000"
+```
+`--without-heartbeat` 绝对禁用。新增 worker/beat 必须遵循此规范。
+
+### 4.19 getDomains 接口规范
+admin/router.py，SQL 里统计字段必须真实查询，禁止硬编码为 0。
+
+### 4.20 auto_review 续接机制
+`resume_pending_review` 由 celery_beat 每 5 分钟触发：
+1. 续接有 pending 实体的 space 的审核任务
+2. 检测有 approved 实体但无 blueprint 的 space，自动触发课程生成
+
+如需手动触发：
+```python
+from apps.api.tasks.auto_review_tasks import auto_review_entities
+auto_review_entities.apply_async(args=['SPACE_ID'], queue='knowledge')
+```
+
+### 4.21 Vue 组件 TypeScript 规范
+- `ref()` 初始值为 null 时必须显式泛型：`ref<any>(null)`
+- 计算属性返回数组需显式声明：`computed<SomeType[]>(() => ...)`
+- filter/some/forEach 回调参数必须有类型注解
+
+### 4.22 Admin 组件 axios 规范
+Admin 页面组件禁止直接 `import axios` 发请求，必须使用带 Authorization 拦截器的实例，否则返回 403 不触发登录跳转。
+
+### 4.23 LLM 超时配置规范
+`llm_gateway.py` 按 model_route 区分超时：tutorial_content/blueprint_synthesis/coherence_eval 用 120s，其他 30s。
+
+### 4.24 前端构建部署方式
+web 容器有 volume 挂载时：
+```bash
+cd ~/studystudio/apps/web && npm run build
+cd ~/studystudio && docker compose cp apps/web/dist/. web:/usr/share/nginx/html/
+```
+注意：web 容器本身没有 volume 挂载，依赖 cp 部署。
+
+### 4.25 beat_schedule 配置方式
+```python
+# 错误：conf.update() 不支持 beat_schedule
+celery_app.conf.update(beat_schedule={...})
+
+# 正确：单独赋值
+celery_app.conf.beat_schedule = {
+    "task-name": {"task": "...", "schedule": 300.0},
+}
+```
+
+---
+
+## 五、常用排查命令
+
+```bash
+# 查看某空间处理进度
+docker compose exec postgres psql -U user -d adaptive_learning -c "
+  SELECT d.document_status,
+    (SELECT COUNT(*) FROM knowledge_entities ke WHERE ke.space_id=d.space_id) AS total,
+    (SELECT COUNT(*) FROM knowledge_entities ke WHERE ke.space_id=d.space_id AND review_status='approved') AS approved,
+    (SELECT status FROM skill_blueprints sb WHERE sb.space_id=d.space_id LIMIT 1) AS bp_status
+  FROM documents d WHERE d.space_id = 'SPACE_ID';
+"
+
+# 知识点审核进度
+docker compose exec postgres psql -U user -d adaptive_learning -c "
+  SELECT review_status, COUNT(*) FROM knowledge_entities
+  WHERE space_id='SPACE_ID' GROUP BY review_status;
+"
+
+# RabbitMQ 队列积压检查
+docker compose exec rabbitmq rabbitmqctl list_queues name messages consumers
+
+# 清空测验题目缓存
+docker compose exec postgres psql -U user -d adaptive_learning -c "DELETE FROM chapter_quizzes;"
+
+# 查看 API 错误日志
+docker compose logs api --tail=50 | grep -E "error|Error|500"
+
+# knowledge worker 实时日志
+docker compose logs celery_worker_knowledge -f | grep -E "start|done|error|approved|resume"
+
+# beat 触发日志
+docker compose logs celery_beat --tail=20 | grep -E "Sending|due task"
+```
+
+---
+
+## 六、下次会话如何开始
+
+当前没有待开发的预排任务，所有计划功能均已完成并验证。
+
+可以继续的方向：
+1. 测验反馈优化：措辞更友好，减少挫败感
+2. 更多上传体验改进
+3. 社区功能增强
+
+直接说想做哪个，先勘察相关代码再动手。

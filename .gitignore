@@ -1,0 +1,29 @@
+# 环境变量（含API密钥，绝对不能上传！）
+.env
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+
+# Node 依赖
+node_modules/
+
+# 临时文件
+*.log
+/tmp/
+
+# 部署包（自解压脚本含二进制归档）
+upgrade_package.tar.gz
+upgrade_studystudio_selfextract.sh
+fresh_install_selfextract.sh
+
+# 字体文件（大二进制文件）
+apps/api/assets/fonts/
+
+# 备份文件
+*.bak
+*.bak.*
+*.old_*

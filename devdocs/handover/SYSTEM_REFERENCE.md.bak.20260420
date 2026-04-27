@@ -1,0 +1,139 @@
+# StudyStudio 系统参考手册
+
+> 本次更新：菜单重构、Phase 1/2（上传简化+公开广场）、space_type 清理
+
+---
+
+## 一、服务架构
+
+| 服务 | 作用 | 端口 |
+|------|------|------|
+| api | FastAPI 后端 | 8000 |
+| web | Vue 前端 nginx | 3000 |
+| celery_worker | tutorial/low_priority 队列 | - |
+| celery_worker_knowledge | knowledge 队列 | - |
+| celery_beat | 定时任务（含 resume_pending_review） | - |
+| postgres | 主数据库（含 pgvector） | 5432 |
+| rabbitmq | 消息队列 | 5672, 15672 |
+| redis | 缓存 | 6379 |
+| minio | 对象存储 | 9000, 9001 |
+
+前端构建（宿主机执行）：
+
+    cd apps/web && npm run build
+    cd ~/studystudio
+    docker compose cp apps/web/dist/. web:/usr/share/nginx/html/
+
+DB 连接：docker compose exec postgres psql -U user -d adaptive_learning
+
+---
+
+## 二、Worker 稳定性配置（重要，禁止违反）
+
+celery_worker_knowledge：--heartbeat-interval=10 --prefetch-multiplier=1，restart: unless-stopped
+celery_beat：必须有 volumes 挂载和完整环境变量
+rabbitmq：consumer_timeout=28800000
+绝对禁用 --without-heartbeat
+
+---
+
+## 三、前端菜单结构（最新）
+
+    学习        /tutorial
+    我的学习路径 /path
+    AI 对话     /chat
+    薄弱环节    /gaps
+    我的课程    /spaces
+    资料库      /upload
+    我的笔记    /notes
+    发现课程    /community
+    账号设置    /profile
+    管理后台    /admin（仅管理员）
+
+---
+
+## 四、Space 相关规范
+
+### visibility 字段（用户可见）
+- private：仅自己
+- shared：凭邀请码加入
+- public：出现在发现页，可无码加入
+
+### space_type 字段（内部，用户不可见）
+数据库保留但前端不展示。当前所有 space 均为 personal。
+
+### 路由注册顺序（重要）
+固定路径必须在路径参数之前：
+1. GET  /spaces/public         （发现课程）
+2. POST /spaces/join           （邀请码加入）
+3. GET  /spaces/{space_id}
+4. POST /spaces/{space_id}/join-public  （公开课程无码加入）
+5. 其他 /spaces/{space_id}/xxx
+
+### 删除 space 的正确顺序
+先删 skill_blueprints（space_id 有非空约束），再删 knowledge_spaces。
+
+---
+
+## 五、新增接口（本次）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | /api/spaces/public | 返回所有 visibility=public 课程 |
+| POST | /api/spaces/{space_id}/join-public | 公开课程无码加入 |
+
+---
+
+## 六、定时任务（celery_beat）
+
+| 任务 | 间隔 | 说明 |
+|------|------|------|
+| check_dlq | 5分钟 | 检查死信队列积压 |
+| resume_pending_review | 5分钟 | 续接审核 + 触发缺失 blueprint |
+
+---
+
+## 七、关键数据表
+
+### course_posts（待建）
+space_id、chapter_id（可空）、user_id、post_type（note/question/discussion）、title、content、reply_count
+
+### course_post_replies（待建）
+post_id、user_id、content
+
+### 其余表见旧 SYSTEM_REFERENCE.md 备份
+
+---
+
+## 八、常见坑位
+
+asyncpg 类型转换：写入侧一律 CAST(:x AS uuid)
+SQL 参数名必须一致：:user_id 对应 {"user_id": ...}
+rubric prompt 大括号：用 .replace() 不用 .format()
+web 容器无 node：构建在宿主机做，docker compose cp 部署产物
+axios 拦截器已剥一层：res.data = payload，不写 res.data.data
+beat_schedule 配置方式：不能放在 conf.update() 里，必须单独赋值
+路由顺序：固定路径段必须在路径参数之前注册
+
+---
+
+## 九、常用诊断命令
+
+    # 查看所有公开课程
+    docker compose exec postgres psql -U user -d adaptive_learning -c \
+      "SELECT space_id, name, visibility FROM knowledge_spaces WHERE visibility='public';"
+
+    # RabbitMQ 队列积压
+    docker compose exec rabbitmq rabbitmqctl list_queues name messages consumers
+
+    # API 错误日志
+    docker compose logs api --tail=50 | grep -E "error|Error|500"
+
+    # knowledge worker 实时日志
+    docker compose logs celery_worker_knowledge -f | grep -E "start|done|error|approved|resume"
+
+    # beat 触发日志
+    docker compose logs celery_beat --tail=20 | grep -E "Sending|due task"
+
+    # 清空测验题目缓存
+    docker compose exec postgres psql -U user -d adaptive_learning -c "DELETE FROM chapter_quizzes;"

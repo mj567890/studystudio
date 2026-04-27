@@ -1,0 +1,181 @@
+# StudyStudio 会话交接文档
+
+**生成日期：** 2026-04-21
+**上次更新主题：** S1 chunk embedding 开发完成 + Blueprint 任务风暴根治 + Migration 012
+
+---
+
+## 一、历史完成工作（已稳定）
+
+### Phase 1~4（略，见旧文档备份）
+
+### 账号管理功能
+- POST /api/users/me/avatar：头像上传到 MinIO
+- PATCH /api/users/me：更新昵称、头像
+- POST /api/users/me/change-password：修改密码（含强度校验）
+- DELETE /api/users/me：账号注销软删除，Migration 010
+
+### 社交学习功能（Phase 1~3）
+- 多成员 space + 邀请码 + visibility（003 迁移）
+- 话题订阅（005 迁移）
+- 公开广场 /community：visibility=public 课程发现 + 一键加入
+- Fork 空间：异步复制（009 迁移）
+- Wall 讨论按 space_id 隔离（011 迁移）
+
+### 测验系统完善
+- 章节测验、得分联动、答题回顾、预生成、ai_rubric
+
+### Blueprint V2（已完成四项质量修复）
+- P0 章节内容覆盖修复（cluster_id 做 key）
+- P1+P2 Stage 规划 + 动词多样性（STAGE_PLANNING_PROMPT）
+- P3 簇大小均衡（_rebalance_clusters）
+
+### 精读原文功能（S2 已修复）
+- document_chunks 新增 page_no 字段
+- source 接口：章节实体关键词 ILIKE 检索原文片段
+- reparse 接口 page-aware，前端 drawer 按文档分组
+
+### RabbitMQ 修复
+- tutorial_tasks backend 改为 redis://redis:6379/1，消除 UUID 队列积压
+
+---
+
+## 二、本次会话完成工作（2026-04-21）
+
+### S1 — chunk embedding 开发完成
+
+**新增 `embed_document_chunks` 任务（embedding_tasks.py）**
+- 批量对 `embedding IS NULL` 的 chunk 生成向量写库
+- 幂等：重跑无副作用
+- 触发时机：
+  1. 普通上传：`ingest_service.py` commit 后 dispatch
+  2. 管理员 reparse：`admin/router.py` 完成后 dispatch
+
+**source 接口升级（routers.py）**
+- 优先向量检索（同 space → 全局）
+- 无向量时 fallback 关键词 ILIKE 检索
+- 已验证：1024 维向量写入正常，top-5 语义召回质量良好
+
+### Blueprint 任务风暴根治（P0~P3）
+
+**根因：** `task_acks_late=True` 全局配置下，worker 重启导致未 ACK 任务批量重投；无幂等锁拦截；`resume_pending_review` 每 5 分钟盲目重派；`max_retries=5` 放大副本数。
+
+**P0 — 幂等锁（blueprint_tasks.py）**
+- 任务最开头检查 DB：同 space 已有 `generating` 且 updated_at < 2小时 → 直接退出
+- 锁检查函数：`_check_blueprint_lock(space_id, topic_key)`
+
+**P0 — on_failure 钩子（blueprint_tasks.py）**
+- 所有 retry 耗尽后调用 `_mark_blueprint_failed`
+- 写入 `status='failed'`，`error_message` 记录错误摘要
+- resume 下次巡检时自动捡起重触发
+
+**P1 — resume_pending_review 修复（auto_review_tasks.py）**
+- `missing_blueprints` SQL 追加排除：`status='published'` 或 `generating` 且 2小时内
+- 新增 `resume_blueprint_rescue_v1`：`generating` 超 2小时自动重置为 `draft` 并记录日志
+
+**P2 — max_retries 5→2（blueprint_tasks.py）**
+
+**P3 — 告警逻辑修正**
+- 后端 `system_health.py`：有消费者时积压状态改为 `healthy`
+- 前端 `SystemHealthView.vue`：`pendingStatClass` 阈值 50→200
+
+**Migration 012（skill_blueprints）**
+- CHECK 约束新增 `failed` 值
+- 新增 `error_message TEXT` 字段
+
+### 完整保障链
+```
+正常完成    → status = published
+worker重启  → 副本被幂等锁拦截，原任务继续
+失败耗尽    → status = failed，error_message 记录原因
+每5分钟     → generating 超2小时自动重置重触发
+            → failed / 无 blueprint → 自动重触发
+```
+
+---
+
+## 三、待开发
+
+### 下次会话首要任务（按优先级）
+
+1. **重跑 websecret V2**：验证 P0/P1/P2/P3 四项 Blueprint 质量修复效果
+2. **Phase 3a — 课程讨论区**：见下方产品设计
+3. **前端 /admin/courses 页面**：课程列表 → 章节详情 → 单章重生成
+
+### Phase 3a — 课程讨论区
+
+#### 产品逻辑
+- 每门课程（space）有一个讨论区
+- 帖子可绑定到某个章节，也可是全局讨论
+- 帖子类型：笔记 / 求助 / 讨论
+- 支持回复（一层，不做无限嵌套）
+- 入口：学习页章节旁「讨论」按钮；侧边栏「讨论」菜单
+
+#### 待建表（DDL 已设计好）
+
+```sql
+CREATE TABLE course_posts (
+    post_id       UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    space_id      UUID NOT NULL REFERENCES knowledge_spaces(space_id) ON DELETE CASCADE,
+    chapter_id    UUID REFERENCES skill_chapters(chapter_id) ON DELETE SET NULL,
+    user_id       UUID NOT NULL REFERENCES users(user_id),
+    post_type     VARCHAR(20) NOT NULL DEFAULT 'discussion'
+                  CHECK (post_type IN ('note', 'question', 'discussion')),
+    title         VARCHAR(255),
+    content       TEXT NOT NULL,
+    reply_count   INTEGER NOT NULL DEFAULT 0,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE course_post_replies (
+    reply_id   UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    post_id    UUID NOT NULL REFERENCES course_posts(post_id) ON DELETE CASCADE,
+    user_id    UUID NOT NULL REFERENCES users(user_id),
+    content    TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+---
+
+## 四、已知 Bug 与技术债
+
+| 编号 | 位置 | 内容 | 状态 |
+|---|---|---|---|
+| T1 | blueprint_tasks.py | chapter_contents 用 title 做 key | **已修复** |
+| T3 | llm_gateway.py | Lock 绑旧 loop | **已根修** |
+| T4 | blueprint_tasks.py | stage_type 硬编码 | **已修复** |
+| T5 | blueprint_tasks.py | CHAPTERS_PER_STAGE 硬编码切片 | **已修复** |
+| S1 | embedding_tasks.py | chunk embedding 写入代码缺失 | **已开发完成** |
+| S2 | document_chunks | 旧文档 page_no 为 null | 管理员逐一重解析可补 |
+| D1-D5 | blueprint_tasks.py | V1 残留代码 | 推迟到 V2 质量稳定后删 |
+
+### 已知数据污染（需重跑消除）
+- websecret blueprint v11：ch6/ch7 同名导致内容污染（T1 已修，重跑后消失）
+
+---
+
+## 五、关键决策记录
+
+- **space_type 对用户完全隐藏**：前端不展示，数据库保留
+- **visibility 是可见性控制字段**：private / shared / public
+- **固定路由必须在参数路由之前注册**
+- **V1 补偿代码推迟清理**：等 V2 质量达到可用再删
+- **chunk embedding 向量检索**：source 接口已升级，有向量优先向量，无向量 fallback 关键词
+- **task_acks_late=True 不改**：全局配置改动影响所有任务，改为在重型任务层面加幂等锁
+- **blueprint failed 状态**：Migration 012 新增，error_message 字段记录失败原因，resume 自动重触发
+- **knowledge 队列积压属于正常运行**：有消费者时积压不报告警，仅 DLQ 积压才报错
+
+---
+
+## 六、开场指引
+
+1. 读本文件（HANDOVER.md）+ SYSTEM_REFERENCE.md + COLLABORATION.md
+2. 勘察想做的功能相关代码（勘察脚本先跑，再动手）
+3. 直接说想推进哪个任务
+
+---
+
+*文档版本：v7.0*
+*生成时间：2026-04-21*
