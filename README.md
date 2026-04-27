@@ -169,21 +169,31 @@ git clone https://github.com/mj567890/studystudio.git
 cd studystudio
 ```
 
-### 2. 一键安装
+### 2. 配置环境变量
 
 ```bash
-# 全新安装（交互式配置：端口、AI API、管理员账号等）
-bash fresh_install_selfextract.sh
+# 复制环境变量模板
+cp .env.example .env
 
-# 或从旧版本升级
-bash upgrade_studystudio_selfextract.sh
+# 编辑 .env，填写以下必填项：
+#   - OPENAI_API_KEY         你的 API Key
+#   - JWT_SECRET_KEY         生成方式：openssl rand -hex 32
+#   - AI_CONFIG_ENCRYPTION_KEY  生成方式见 .env.example 内注释
 ```
 
-安装脚本自动完成：环境变量生成 → 镜像构建 → 数据库迁移 → 服务启动 → 健康检查。
+### 3. 启动服务
 
-详细说明见 [INSTALL.md](INSTALL.md)。
+```bash
+# 方式 A：一键安装脚本（交互式配置，含管理员账号创建）
+bash fresh_install_selfextract.sh
 
-### 3. 访问
+# 方式 B：Docker Compose 直接启动（需先完成步骤 2 的 .env 配置）
+docker compose up -d
+```
+
+> Windows 用户：启动前确保 Docker Desktop 已运行（任务栏鲸鱼图标就绪）。详见 [INSTALL.md](INSTALL.md)。
+
+### 4. 访问
 
 | 服务 | 地址 |
 |:---|:---|
