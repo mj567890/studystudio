@@ -8,6 +8,7 @@
 
 <br/>
 
+![Version](https://img.shields.io/badge/Version-2.7.0-blue?style=flat-square)
 ![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=flat-square&logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.110-009688?style=flat-square&logo=fastapi&logoColor=white)
 ![Vue](https://img.shields.io/badge/Vue-3.4-4FC08D?style=flat-square&logo=vue.js&logoColor=white)
@@ -164,53 +165,25 @@
 ### 1. 克隆仓库
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/mj567890/studystudio.git
 cd studystudio
 ```
 
-### 2. 配置环境变量
+### 2. 一键安装
 
 ```bash
-cp .env.example .env
+# 全新安装（交互式配置：端口、AI API、管理员账号等）
+bash fresh_install_selfextract.sh
+
+# 或从旧版本升级
+bash upgrade_studystudio_selfextract.sh
 ```
 
-编辑 `.env`，填写必要配置：
+安装脚本自动完成：环境变量生成 → 镜像构建 → 数据库迁移 → 服务启动 → 健康检查。
 
-```env
-# 数据库
-DATABASE_URL=postgresql+asyncpg://user:password@postgres:5432/adaptive_learning
+详细说明见 [INSTALL.md](INSTALL.md)。
 
-# JWT 密钥
-SECRET_KEY=your-secret-key-min-32-chars
-
-# LLM（支持 OpenAI 及任意兼容接口）
-OPENAI_API_KEY=sk-...
-OPENAI_BASE_URL=https://api.openai.com/v1
-
-# MinIO 对象存储
-MINIO_ACCESS_KEY=minioadmin
-MINIO_SECRET_KEY=minioadmin
-
-# AI 配置加密密钥
-CRYPTO_KEY=your-32-byte-key
-```
-
-### 3. 启动所有服务
-
-```bash
-docker-compose up -d
-```
-
-### 4. 初始化数据库
-
-```bash
-# 依次执行 migrations/ 目录下的 SQL 文件
-for f in migrations/*.sql; do
-  docker-compose exec -T postgres psql -U user -d adaptive_learning < "$f"
-done
-```
-
-### 5. 访问
+### 3. 访问
 
 | 服务 | 地址 |
 |:---|:---|
@@ -258,7 +231,7 @@ studystudio/
 │           ├── api/                # API 调用封装
 │           ├── stores/             # Pinia 状态管理
 │           └── router/             # 路由配置
-├── migrations/                     # 数据库迁移 SQL（13 个版本）
+├── migrations/                     # 数据库迁移 SQL（23 个版本）
 ├── scripts/                        # 工具脚本
 ├── devdocs/                        # 开发文档 & 架构说明
 └── docker-compose.yml
@@ -274,6 +247,18 @@ studystudio/
 | `celery_worker_knowledge` | `knowledge` · `blueprint.synthesis` | 知识提取 / 蓝图生成 | 8 |
 | `celery_worker_review` | `knowledge.review` | 知识点 AI 审核（专用隔离）| 2 |
 | `celery_beat` | — | 定时巡检（每 5 分钟自动续接中断任务）| — |
+
+---
+
+## 🔒 安全
+
+- **全栈安全审计**：2026-04 完成，4 CRITICAL + 10 HIGH + 14 MEDIUM 项已修复
+- **认证强化**：JWT 启动强制校验、bcrypt 密码哈希、IP 级速率限制（登录 20/min，注册 5/min）
+- **前端防护**：DOMPurify XSS 净化、CSP / X-Frame-Options / HSTS 等 8 个安全响应头
+- **容器加固**：API 非 root 用户运行、凭据全部 `.env` 变量化、SQL 参数化查询
+- **依赖升级**：axios 1.6.0 → 1.7.9（修复 CVE-2023-45857）
+
+详见 [安全审计报告](devdocs/security/SECURITY_AUDIT_REPORT_20260427.md)。
 
 ---
 
