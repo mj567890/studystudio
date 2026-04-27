@@ -29,6 +29,7 @@ class UpdateSpaceRequest(BaseModel):
     name:        Optional[str] = Field(default=None, max_length=255)
     description: Optional[str] = Field(default=None)
     visibility:  Optional[str] = Field(default=None, pattern="^(private|shared|public)$")
+    allow_fork:  Optional[bool] = Field(default=None)
 
 
 
@@ -127,7 +128,7 @@ async def list_public_spaces(
                 ) AS is_member
             FROM knowledge_spaces ks
             LEFT JOIN users u ON u.user_id = ks.owner_id
-            WHERE ks.visibility = 'public'
+            WHERE ks.visibility = 'public' AND ks.deleted_at IS NULL
             ORDER BY ks.created_at DESC
             LIMIT :limit OFFSET :offset
         """),
@@ -138,7 +139,7 @@ async def list_public_spaces(
     total_row = await db.execute(
         text("""
             SELECT COUNT(*) FROM knowledge_spaces
-            WHERE visibility = 'public'
+            WHERE visibility = 'public' AND deleted_at IS NULL
         """)
     )
     total = total_row.scalar() or 0
@@ -189,6 +190,7 @@ async def update_space(
             req.name,
             req.description,
             req.visibility,
+            req.allow_fork,
         )
     except SpaceError as e:
         _raise_http(e)
@@ -209,7 +211,7 @@ async def join_public_space(
 
     # 检查课程存在且是公开的
     row = await db.execute(
-        text("SELECT name, visibility FROM knowledge_spaces WHERE space_id = CAST(:sid AS uuid)"),
+        text("SELECT name, visibility FROM knowledge_spaces WHERE space_id = CAST(:sid AS uuid) AND deleted_at IS NULL"),
         {"sid": sid}
     )
     space = row.fetchone()
@@ -742,3 +744,127 @@ async def get_space_chapters(
         for r in rows
     ]
     return {"code": 200, "msg": "success", "data": {"chapters": chapters}}
+
+
+# ═══════════════════════════════════════════════════════════════
+# 删除 / 回收站
+# ═══════════════════════════════════════════════════════════════
+
+@router.delete("/spaces/{space_id}")
+async def delete_space(
+    space_id: UUID,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession   = Depends(get_db),
+) -> dict:
+    """软删除空间——移入回收站。"""
+    service = SpaceService(db)
+    try:
+        data = await service.soft_delete_space(str(space_id), current_user["user_id"])
+    except SpaceError as e:
+        _raise_http(e)
+    return {"code": 200, "msg": "已移入回收站", "data": data}
+
+
+@router.get("/spaces/trash")
+async def list_trash(
+    limit:  int = 20,
+    offset: int = 0,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession   = Depends(get_db),
+) -> dict:
+    """回收站列表（仅自己拥有的空间）。"""
+    service = SpaceService(db)
+    data = await service.list_trash_spaces(current_user["user_id"], limit, offset)
+    return {"code": 200, "msg": "success", "data": data}
+
+
+@router.post("/spaces/{space_id}/restore")
+async def restore_space(
+    space_id: UUID,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession   = Depends(get_db),
+) -> dict:
+    """从回收站还原空间。"""
+    service = SpaceService(db)
+    try:
+        data = await service.restore_space(str(space_id), current_user["user_id"])
+    except SpaceError as e:
+        _raise_http(e)
+    return {"code": 200, "msg": "已还原", "data": data}
+
+
+@router.delete("/spaces/{space_id}/permanent")
+async def permanent_delete_space(
+    space_id: UUID,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession   = Depends(get_db),
+) -> dict:
+    """彻底删除空间（不可逆）。"""
+    service = SpaceService(db)
+    try:
+        data = await service.permanent_delete_space(
+            str(space_id), current_user["user_id"]
+        )
+    except SpaceError as e:
+        _raise_http(e)
+    return {"code": 200, "msg": "已彻底删除", "data": data}
+
+
+@router.delete("/spaces/trash")
+async def empty_trash(
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession   = Depends(get_db),
+) -> dict:
+    """清空回收站——彻底删除所有可删除空间。"""
+    service = SpaceService(db)
+    data = await service.empty_trash(current_user["user_id"])
+    return {"code": 200, "msg": "回收站已清空", "data": data}
+
+
+@router.get("/spaces/{space_id}/deletion-impact")
+async def get_deletion_impact(
+    space_id: UUID,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession   = Depends(get_db),
+) -> dict:
+    """获取删除该空间的影响范围数据（供确认弹窗使用）。"""
+    service = SpaceService(db)
+    try:
+        data = await service.get_deletion_impact(
+            str(space_id), current_user["user_id"]
+        )
+    except SpaceError as e:
+        _raise_http(e)
+    return {"code": 200, "msg": "success", "data": data}
+
+
+@router.get("/spaces/{space_id}/public-info")
+async def get_public_info(
+    space_id: UUID,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession   = Depends(get_db),
+) -> dict:
+    """设置公开前获取影响范围信息（供确认弹窗使用）。"""
+    service = SpaceService(db)
+    try:
+        await service._require_manager(str(space_id), current_user["user_id"])
+    except SpaceError as e:
+        _raise_http(e)
+
+    stats = await service.repo.get_deletion_impact(str(space_id))
+    return {
+        "code": 200, "msg": "success",
+        "data": {
+            "document_count": stats.get("document_count", 0),
+            "entity_count": stats.get("entity_count", 0),
+            "warning_text": (
+                "公开课程后：\n"
+                "1. 您的课程章节、知识点将对所有登录用户可见\n"
+                "2. 若同时开启「允许 Fork」，其他用户可复制您的课程\n"
+                "3. 您的文档将为 fork 用户提供溯源依据\n"
+                "4. 被 fork 后，您可能无法强制删除已共享的文档\n"
+                "5. 因主动公开导致的内容扩散，系统不承担责任"
+            ),
+            "requires_confirmation": True,
+        },
+    }

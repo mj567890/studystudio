@@ -394,7 +394,7 @@ export const spaceApi = {
     http.get('/spaces'),
   get: (spaceId: string) =>
     http.get(`/spaces/${spaceId}`),
-  update: (spaceId: string, data: { name?: string; description?: string; visibility?: string }) =>
+  update: (spaceId: string, data: { name?: string; description?: string; visibility?: string; allow_fork?: boolean }) =>
     http.patch(`/spaces/${spaceId}`, data),
   listMembers: (spaceId: string) =>
     http.get(`/spaces/${spaceId}/members`),
@@ -429,6 +429,21 @@ export const spaceApi = {
     http.get(`/spaces/${spaceId}/blueprint`),
   getChapters: (spaceId: string) =>
     http.get(`/spaces/${spaceId}/chapters`),
+  // 删除与回收站
+  deleteSpace: (spaceId: string) =>
+    http.delete(`/spaces/${spaceId}`),
+  restoreSpace: (spaceId: string) =>
+    http.post(`/spaces/${spaceId}/restore`),
+  permanentDelete: (spaceId: string) =>
+    http.delete(`/spaces/${spaceId}/permanent`),
+  listTrash: (limit = 20, offset = 0) =>
+    http.get('/spaces/trash', { params: { limit, offset } }),
+  emptyTrash: () =>
+    http.delete('/spaces/trash'),
+  getDeletionImpact: (spaceId: string) =>
+    http.get(`/spaces/${spaceId}/deletion-impact`),
+  getPublicInfo: (spaceId: string) =>
+    http.get(`/spaces/${spaceId}/public-info`),
 }
 
 export const profileApi = {

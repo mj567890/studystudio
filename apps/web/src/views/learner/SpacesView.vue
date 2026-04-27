@@ -7,6 +7,9 @@
           @click="joinDialog = true">
           <el-icon><Plus /></el-icon> 加入课程
         </el-button>
+        <el-button size="small" style="float:right" @click="$router.push('/spaces/trash')">
+          <el-icon><Delete /></el-icon> 回收站
+        </el-button>
         <el-button size="small" style="float:right" @click="load">刷新</el-button>
       </template>
 
@@ -148,9 +151,9 @@ async function load() {
 function onRowClick(row: any) { goDetail(row) }
 function goDetail(row: any) { router.push(`/spaces/${row.space_id}`) }
 
-// Fork 按钮只对 public 课程（且自己不是 owner）显示
+// Fork 按钮只对 public + allow_fork 课程（且自己不是 owner）显示
 function canFork(row: any): boolean {
-  if (row.visibility === 'public' && row.my_role !== 'owner') return true
+  if (row.visibility === 'public' && row.allow_fork !== false && row.my_role !== 'owner') return true
   return false
 }
 

@@ -25,13 +25,28 @@
         </el-descriptions-item>
 
         <el-descriptions-item label="可见性">
-          <el-select v-if="editable" v-model="editForm.visibility" size="small" style="width:160px">
-            <el-option label="🔒 私有" value="private" />
-            <el-option label="🌐 公开（出现在发现页）" value="public" />
-          </el-select>
-          <el-tag v-else size="small" :type="visibilityTag(space.visibility)">
-            {{ visibilityLabel(space.visibility) }}
-          </el-tag>
+          <div v-if="editable">
+            <el-select v-model="editForm.visibility" size="small" style="width:160px">
+              <el-option label="🔒 私有" value="private" />
+              <el-option label="🌐 公开（出现在发现页）" value="public" />
+            </el-select>
+            <el-checkbox
+              v-if="editForm.visibility === 'public'"
+              v-model="editForm.allow_fork"
+              size="small"
+              style="margin-left:12px"
+            >
+              允许 Fork
+            </el-checkbox>
+          </div>
+          <div v-else>
+            <el-tag size="small" :type="visibilityTag(space.visibility)">
+              {{ visibilityLabel(space.visibility) }}
+            </el-tag>
+            <el-tag v-if="space.visibility === 'public'" size="small" :type="space.allow_fork ? 'success' : 'info'" style="margin-left:6px">
+              {{ space.allow_fork ? '允许 Fork' : '禁止 Fork' }}
+            </el-tag>
+          </div>
         </el-descriptions-item>
         <el-descriptions-item label="成员数">{{ space.member_count }}</el-descriptions-item>
         <el-descriptions-item label="描述" :span="2">
@@ -43,6 +58,7 @@
       <div v-if="canManage" style="margin-top:12px; text-align:right">
         <template v-if="!editable">
           <el-button size="small" @click="startEdit">编辑</el-button>
+          <el-button size="small" type="danger" @click="onDeleteClick">删除空间</el-button>
         </template>
         <template v-else>
           <el-button size="small" @click="editable = false">取消</el-button>
@@ -162,15 +178,43 @@
       </el-table>
     </el-card>
 
+    <!-- 删除确认弹窗 -->
+    <DeleteConfirmDialog
+      :visible="deleteDialog.visible"
+      :title="deleteDialog.title"
+      :type="deleteDialog.type"
+      :impact="deleteDialog.impact"
+      :loading="deleteDialog.loading"
+      :submitting="deleteDialog.submitting"
+      :blocked="deleteDialog.blocked"
+      :blocked-reason="deleteDialog.blockedReason"
+      @update:visible="deleteDialog.visible = $event"
+      @confirm="onDeleteConfirm"
+    />
+
+    <!-- 设为公开确认弹窗 -->
+    <DeleteConfirmDialog
+      :visible="publicConfirmVisible"
+      title="设为公开"
+      type="set-public"
+      :impact="publicInfo"
+      :loading="loadingPublicInfo"
+      :submitting="false"
+      :blocked="false"
+      blocked-reason=""
+      @update:visible="publicConfirmVisible = $event"
+      @confirm="onPublicConfirm"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { spaceApi, blueprintApi } from '@/api'
 import { useAuthStore } from '@/stores/auth'
+import DeleteConfirmDialog from '@/components/DeleteConfirmDialog.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -220,18 +264,96 @@ function startEdit() {
     name: space.value.name || '',
     description: space.value.description || '',
     visibility: space.value.visibility || 'private',
+    allow_fork: space.value.allow_fork !== false,
   }
   editable.value = true
 }
 
 async function saveEdit() {
+  // 设为公开时显示确认弹窗
+  if (editForm.value.visibility === 'public' && space.value.visibility !== 'public') {
+    publicConfirmVisible.value = true
+    await loadPublicInfo()
+    return
+  }
+  await doSaveEdit()
+}
+
+async function doSaveEdit() {
   saving.value = true
   try {
-    const res: any = await spaceApi.update(spaceId.value, editForm.value)
+    const body: any = {
+      name: editForm.value.name,
+      description: editForm.value.description,
+      visibility: editForm.value.visibility,
+    }
+    if (editForm.value.visibility === 'public') {
+      body.allow_fork = editForm.value.allow_fork
+    }
+    const res: any = await spaceApi.update(spaceId.value, body)
     space.value = res.data
     editable.value = false
+    publicConfirmVisible.value = false
     ElMessage.success('已保存')
   } catch {} finally { saving.value = false }
+}
+
+// 设为公开确认弹窗
+const publicConfirmVisible = ref(false)
+const publicInfo = ref<any>(null)
+const loadingPublicInfo = ref(false)
+
+async function loadPublicInfo() {
+  loadingPublicInfo.value = true
+  try {
+    const res: any = await spaceApi.getPublicInfo(spaceId.value)
+    publicInfo.value = res.data
+  } catch {} finally { loadingPublicInfo.value = false }
+}
+
+function onPublicConfirm() {
+  doSaveEdit()
+}
+
+// 删除确认
+const deleteDialog = reactive({
+  visible: false,
+  title: '',
+  type: 'delete-space' as 'delete-space' | 'permanent-delete',
+  impact: null as any,
+  loading: false,
+  submitting: false,
+  blocked: false,
+  blockedReason: '',
+})
+
+async function onDeleteClick() {
+  deleteDialog.visible = true
+  deleteDialog.type = 'delete-space'
+  deleteDialog.title = `删除「${space.value?.name}」`
+  deleteDialog.loading = true
+  deleteDialog.impact = null
+  deleteDialog.blocked = false
+  deleteDialog.blockedReason = ''
+  try {
+    const res: any = await spaceApi.getDeletionImpact(spaceId.value)
+    const impact = res.data
+    deleteDialog.impact = impact
+    if (impact.fork_count > 0) {
+      deleteDialog.blocked = true
+      deleteDialog.blockedReason = `此资料库被 ${impact.fork_count} 人 fork，无法彻底删除。文档仍被引用，将改为软删除。`
+    }
+  } catch {} finally { deleteDialog.loading = false }
+}
+
+async function onDeleteConfirm() {
+  deleteDialog.submitting = true
+  try {
+    await spaceApi.deleteSpace(spaceId.value)
+    ElMessage.success('空间已移入回收站')
+    deleteDialog.visible = false
+    router.push('/spaces')
+  } catch {} finally { deleteDialog.submitting = false }
 }
 
 async function resetCode() {

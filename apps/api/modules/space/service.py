@@ -120,11 +120,12 @@ class SpaceService:
         name: str | None,
         description: str | None,
         visibility: str | None,
+        allow_fork: bool | None = None,
     ) -> dict:
         await self._require_manager(space_id, user_id)
         if visibility is not None and visibility not in _VALID_VISIBILITIES:
             raise SpaceError("SPACE_400", f"Invalid visibility: {visibility}")
-        await self.repo.update_space(space_id, name, description, visibility)
+        await self.repo.update_space(space_id, name, description, visibility, allow_fork)
         await self.db.commit()
         return await self.get_space_detail(space_id, user_id)
 
@@ -328,7 +329,8 @@ class SpaceService:
         """校验用户是否有权访问该 space。global space 对所有登录用户开放。"""
         from sqlalchemy import text as _t
         row = await self.db.execute(
-            _t("SELECT space_type FROM knowledge_spaces WHERE space_id=CAST(:sid AS uuid)"),
+            _t("SELECT space_type FROM knowledge_spaces "
+               "WHERE space_id=CAST(:sid AS uuid) AND deleted_at IS NULL"),
             {"sid": space_id}
         )
         r = row.fetchone()
@@ -451,4 +453,238 @@ class SpaceService:
         if task["requested_by"] != user_id:
             raise SpaceError("SPACE_403", "Access denied")
         return task
+
+    # -- 删除 / 回收站 --------------------------------------------------------
+
+    async def soft_delete_space(
+        self, space_id: str | UUID, user_id: str | UUID
+    ) -> dict:
+        """软删除：将空间移入回收站。"""
+        sid = str(space_id)
+        uid = str(user_id)
+        await self._require_manager(sid, uid)
+
+        fork_count = await self.repo.count_direct_forks(sid)
+
+        await self.repo.soft_delete_space(sid, uid)
+        await self.db.commit()
+
+        logger.info("Space soft-deleted", space_id=sid, user_id=uid,
+                     fork_count=fork_count)
+
+        return {
+            "space_id":             sid,
+            "fork_count":           fork_count,
+            "can_permanent_delete": fork_count == 0,
+        }
+
+    async def restore_space(
+        self, space_id: str | UUID, user_id: str | UUID
+    ) -> dict:
+        """从回收站还原空间。"""
+        sid = str(space_id)
+        uid = str(user_id)
+
+        trash = await self.repo.get_trash_space(sid, uid)
+        if not trash:
+            raise SpaceError("SPACE_404", "空间不在回收站中或无权操作")
+
+        await self.repo.restore_space(sid)
+        await self.db.commit()
+
+        logger.info("Space restored", space_id=sid, user_id=uid)
+        return await self.get_space_detail(sid, uid)
+
+    async def permanent_delete_space(
+        self, space_id: str | UUID, user_id: str | UUID
+    ) -> dict:
+        """彻底删除空间（级联清理所有数据）。"""
+        sid = str(space_id)
+        uid = str(user_id)
+        await self._require_manager(sid, uid)
+
+        # 检查 fork 引用
+        fork_count = await self.repo.count_direct_forks(sid)
+        if fork_count > 0:
+            raise SpaceError(
+                "SPACE_409",
+                f"此资料库被 {fork_count} 人 fork，无法彻底删除。"
+                "文档仍被引用，已改为软删除。"
+            )
+
+        # 收集 MinIO 文件列表（事务外清理）
+        file_urls = await self.repo.get_space_documents(sid)
+
+        # 事务内级联清理
+        from sqlalchemy import text as _t
+
+        # 按依赖顺序：先删子表引用，再删主表
+        delete_queries = [
+            # 通知
+            ("DELETE FROM user_notifications WHERE target_type='space' AND target_id=CAST(:sid AS text)", {}),
+            # 讨论回复
+            _t("DELETE FROM course_post_replies WHERE post_id IN "
+               "(SELECT post_id FROM course_posts WHERE space_id = CAST(:sid AS uuid))"),
+            # 讨论帖
+            _t("DELETE FROM course_posts WHERE space_id = CAST(:sid AS uuid)"),
+            # 学习墙回复
+            _t("DELETE FROM wall_replies WHERE post_id IN "
+               "(SELECT post_id FROM wall_posts WHERE space_id = CAST(:sid AS uuid))"),
+            # 学习墙
+            _t("DELETE FROM wall_posts WHERE space_id = CAST(:sid AS uuid)"),
+            # 社区策展
+            _t("DELETE FROM community_curations WHERE space_id = CAST(:sid AS uuid)"),
+            # 对话
+            _t("DELETE FROM conversations WHERE space_id = CAST(:sid AS uuid)"),
+            # 笔记实体链接（通过 entity -> space 关联）
+            _t("DELETE FROM note_entity_links WHERE entity_id IN "
+               "(SELECT entity_id FROM knowledge_entities WHERE space_id = CAST(:sid AS uuid))"),
+            # 个人实体引用
+            _t("DELETE FROM personal_entity_references WHERE ref_entity_id IN "
+               "(SELECT entity_id FROM knowledge_entities WHERE space_id = CAST(:sid AS uuid))"),
+            # 知识点掌握状态
+            _t("DELETE FROM learner_knowledge_states WHERE entity_id IN "
+               "(SELECT entity_id FROM knowledge_entities WHERE space_id = CAST(:sid AS uuid))"),
+            # 测验（通过 chapter -> blueprint -> space 关联）
+            _t("DELETE FROM chapter_quiz_attempts WHERE chapter_id IN "
+               "(SELECT chapter_id::text FROM skill_chapters sc "
+               "JOIN skill_blueprints sb ON sb.blueprint_id = sc.blueprint_id "
+               "WHERE sb.space_id = CAST(:sid AS uuid))"),
+            _t("DELETE FROM chapter_quizzes WHERE chapter_id IN "
+               "(SELECT chapter_id::text FROM skill_chapters sc "
+               "JOIN skill_blueprints sb ON sb.blueprint_id = sc.blueprint_id "
+               "WHERE sb.space_id = CAST(:sid AS uuid))"),
+            # 学习进度
+            _t("DELETE FROM chapter_progress WHERE chapter_id IN "
+               "(SELECT chapter_id::text FROM skill_chapters sc "
+               "JOIN skill_blueprints sb ON sb.blueprint_id = sc.blueprint_id "
+               "WHERE sb.space_id = CAST(:sid AS uuid))"),
+            # 章末反思
+            _t("DELETE FROM chapter_reflections WHERE chapter_id IN "
+               "(SELECT chapter_id::text FROM skill_chapters sc "
+               "JOIN skill_blueprints sb ON sb.blueprint_id = sc.blueprint_id "
+               "WHERE sb.space_id = CAST(:sid AS uuid))"),
+            # 章节实体链接
+            _t("DELETE FROM chapter_entity_links WHERE chapter_id IN "
+               "(SELECT chapter_id FROM skill_chapters sc "
+               "JOIN skill_blueprints sb ON sb.blueprint_id = sc.blueprint_id "
+               "WHERE sb.space_id = CAST(:sid AS uuid))"),
+            # 各层结构
+            _t("DELETE FROM skill_chapters WHERE blueprint_id IN "
+               "(SELECT blueprint_id FROM skill_blueprints WHERE space_id = CAST(:sid AS uuid))"),
+            _t("DELETE FROM skill_stages WHERE blueprint_id IN "
+               "(SELECT blueprint_id FROM skill_blueprints WHERE space_id = CAST(:sid AS uuid))"),
+            _t("DELETE FROM skill_blueprints WHERE space_id = CAST(:sid AS uuid)"),
+            _t("DELETE FROM tutorial_skeletons WHERE space_id = CAST(:sid AS uuid)"),
+            # 知识点关系
+            _t("DELETE FROM knowledge_relations WHERE source_entity_id IN "
+               "(SELECT entity_id FROM knowledge_entities WHERE space_id = CAST(:sid AS uuid))"),
+            # 知识点
+            _t("DELETE FROM knowledge_entities WHERE space_id = CAST(:sid AS uuid)"),
+            # 文档分块
+            _t("DELETE FROM document_chunks WHERE document_id IN "
+               "(SELECT document_id FROM documents WHERE space_id = CAST(:sid AS uuid))"),
+            # 文档
+            _t("DELETE FROM documents WHERE space_id = CAST(:sid AS uuid)"),
+            # 文档共享引用（源空间删除时清理）
+            _t("DELETE FROM space_document_access WHERE source_space_id = CAST(:sid AS uuid)"),
+            # fork 任务
+            _t("DELETE FROM fork_tasks WHERE source_space_id = CAST(:sid AS uuid)"),
+            # 订阅
+            _t("DELETE FROM space_subscriptions WHERE space_id = CAST(:sid AS uuid)"),
+            # 成员
+            _t("DELETE FROM space_members WHERE space_id = CAST(:sid AS uuid)"),
+            # 取消运行中任务
+            _t("UPDATE task_executions SET status='cancelled' WHERE space_id = CAST(:sid AS uuid) "
+               "AND status IN ('pending','running')"),
+        ]
+
+        for q in delete_queries:
+            try:
+                if isinstance(q, tuple):
+                    await self.db.execute(_t(q[0]), {"sid": sid, **q[1]})
+                else:
+                    await self.db.execute(q, {"sid": sid})
+            except Exception:
+                pass  # 表可能不存在，跳过
+
+        # 删除空间本身
+        await self.db.execute(
+            _t("DELETE FROM knowledge_spaces WHERE space_id = CAST(:sid AS uuid)"),
+            {"sid": sid}
+        )
+        await self.db.commit()
+
+        # 事务外：清理 MinIO 文件（写入 Redis 兜底列表）
+        if file_urls:
+            try:
+                import json as _json
+                from apps.api.core.redis import get_redis
+                redis = await get_redis()
+                await redis.setex(
+                    f"cleanup:minio:{sid}",
+                    86400 * 3,  # 3 天 TTL
+                    _json.dumps(file_urls)
+                )
+            except Exception:
+                logger.warning("Failed to write MinIO cleanup list to Redis",
+                               space_id=sid)
+
+        logger.info("Space permanently deleted", space_id=sid, user_id=uid,
+                     file_count=len(file_urls))
+
+        return {"space_id": sid, "status": "permanently_deleted",
+                "pending_minio_files": len(file_urls)}
+
+    async def list_trash_spaces(
+        self, user_id: str | UUID, limit: int = 20, offset: int = 0
+    ) -> dict:
+        """获取回收站列表。"""
+        uid = str(user_id)
+        spaces = await self.repo.list_trash_spaces(uid, limit, offset)
+        total = await self.repo.count_trash_spaces(uid)
+        return {"spaces": spaces, "total": total}
+
+    async def empty_trash(self, user_id: str | UUID) -> dict:
+        """清空回收站：彻底删除用户回收站中所有可删除的空间。"""
+        uid = str(user_id)
+        spaces = await self.repo.list_trash_spaces(uid, limit=1000, offset=0)
+
+        deleted = []
+        skipped = []
+        for s in spaces:
+            if s["can_permanent_delete"]:
+                try:
+                    await self.permanent_delete_space(s["space_id"], uid)
+                    deleted.append(s["space_id"])
+                except SpaceError:
+                    skipped.append(s["space_id"])
+            else:
+                skipped.append(s["space_id"])
+
+        logger.info("Trash emptied", user_id=uid,
+                     deleted=len(deleted), skipped=len(skipped))
+        return {"deleted": deleted, "skipped": skipped}
+
+    async def get_deletion_impact(
+        self, space_id: str | UUID, user_id: str | UUID
+    ) -> dict:
+        """获取删除空间的影响范围数据。"""
+        sid = str(space_id)
+        await self._require_manager(sid, str(user_id))
+
+        stats = await self.repo.get_deletion_impact(sid)
+        fork_count = stats.get("fork_count", 0)
+
+        return {
+            **stats,
+            "can_permanent_delete": fork_count == 0,
+            "warning": (
+                "彻底删除后，所有学员的学习进度、掌握度、讨论帖、测验成绩"
+                "将被永久清除，此操作不可逆。"
+            ) if fork_count == 0 else (
+                f"此资料库被 {fork_count} 人 fork，文档仍被引用，无法彻底删除。"
+                "您可以选择软删除（仅对您不可见），文档将继续保留给 fork 用户。"
+            ),
+        }
 

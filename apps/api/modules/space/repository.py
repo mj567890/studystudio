@@ -42,8 +42,8 @@ class SpaceRepository:
                 LEFT JOIN space_members sm
                        ON sm.space_id = ks.space_id
                       AND sm.user_id  = CAST(:uid AS uuid)
-                WHERE  sm.user_id IS NOT NULL
-                   OR  ks.space_type = 'global'
+                WHERE  ks.deleted_at IS NULL
+                  AND  (sm.user_id IS NOT NULL OR ks.space_type = 'global')
                 ORDER BY
                     CASE ks.space_type WHEN 'global' THEN 0 ELSE 1 END,
                     ks.created_at DESC
@@ -78,6 +78,7 @@ class SpaceRepository:
                        ON sm.space_id = ks.space_id
                       AND sm.user_id  = CAST(:uid AS uuid)
                 WHERE  ks.space_id = CAST(:sid AS uuid)
+                  AND  ks.deleted_at IS NULL
             """),
             {"sid": sid, "uid": uid},
         )
@@ -137,7 +138,7 @@ class SpaceRepository:
             text("""
                 SELECT space_id::text AS space_id, name, visibility
                 FROM   knowledge_spaces
-                WHERE  invite_code = :code
+                WHERE  invite_code = :code AND deleted_at IS NULL
             """),
             {"code": code},
         )
@@ -164,7 +165,7 @@ class SpaceRepository:
 
     async def is_invite_code_taken(self, code: str) -> bool:
         result = await self.db.execute(
-            text("SELECT 1 FROM knowledge_spaces WHERE invite_code = :code"),
+            text("SELECT 1 FROM knowledge_spaces WHERE invite_code = :code AND deleted_at IS NULL"),
             {"code": code},
         )
         return result.fetchone() is not None
@@ -200,6 +201,7 @@ class SpaceRepository:
         name: str | None,
         description: str | None,
         visibility: str | None,
+        allow_fork: bool | None = None,
     ) -> None:
         sid = _uid(space_id)
         sets: list[str] = []
@@ -213,6 +215,9 @@ class SpaceRepository:
         if visibility is not None:
             sets.append("visibility = :visibility")
             params["visibility"] = visibility
+        if allow_fork is not None:
+            sets.append("allow_fork = :allow_fork")
+            params["allow_fork"] = allow_fork
         if not sets:
             return
         sets.append("updated_at = now()")
@@ -339,7 +344,7 @@ class SpaceRepository:
                        sb.version AS current_version,
                        sb.title   AS blueprint_title
                 FROM space_subscriptions ss
-                JOIN knowledge_spaces ks ON ks.space_id = ss.space_id
+                JOIN knowledge_spaces ks ON ks.space_id = ss.space_id AND ks.deleted_at IS NULL
                 LEFT JOIN skill_blueprints sb
                        ON sb.topic_key = ss.topic_key
                       AND sb.status    = 'published'
@@ -380,6 +385,8 @@ class SpaceRepository:
             "my_role":     getattr(row, "my_role", None),
             "member_count": int(getattr(row, "member_count", 0) or 0),
             "fork_from_space_id": getattr(row, "fork_from_space_id", None),
+            "deleted_at":  row.deleted_at.isoformat() if getattr(row, "deleted_at", None) else None,
+            "allow_fork":  bool(getattr(row, "allow_fork", False)),
         }
 
     # -- fork --
@@ -446,4 +453,214 @@ class SpaceRepository:
             """),
             {"tgt": target_space_id, "tid": task_id},
         )
+
+    # -- 软删除 / 回收站 -----------------------------------------------------
+
+    async def soft_delete_space(
+        self, space_id: str, user_id: str
+    ) -> None:
+        """标记空间为已删除（移入回收站）。"""
+        sid = _uid(space_id)
+        await self.db.execute(
+            text("""
+                UPDATE knowledge_spaces
+                SET deleted_at = now(),
+                    deleted_by = CAST(:uid AS uuid),
+                    updated_at = now()
+                WHERE space_id = CAST(:sid AS uuid)
+            """),
+            {"sid": sid, "uid": _uid(user_id)},
+        )
+
+    async def restore_space(self, space_id: str) -> None:
+        """从回收站还原空间。"""
+        sid = _uid(space_id)
+        await self.db.execute(
+            text("""
+                UPDATE knowledge_spaces
+                SET deleted_at = NULL,
+                    deleted_by = NULL,
+                    updated_at = now()
+                WHERE space_id = CAST(:sid AS uuid)
+            """),
+            {"sid": sid},
+        )
+
+    async def list_trash_spaces(
+        self, user_id: str, limit: int = 20, offset: int = 0
+    ) -> list[dict]:
+        """返回用户拥有的、在回收站中的空间。"""
+        uid = _uid(user_id)
+        result = await self.db.execute(
+            text("""
+                SELECT
+                    ks.space_id::text   AS space_id,
+                    ks.name             AS name,
+                    ks.space_type       AS space_type,
+                    ks.deleted_at       AS deleted_at,
+                    ks.fork_from_space_id::text AS fork_from_space_id,
+                    (SELECT COUNT(*) FROM fork_tasks ft
+                     WHERE ft.source_space_id = ks.space_id) AS fork_count,
+                    (SELECT COUNT(*) FROM space_members sm
+                     WHERE sm.space_id = ks.space_id) AS member_count
+                FROM knowledge_spaces ks
+                WHERE ks.owner_id = CAST(:uid AS uuid)
+                  AND ks.deleted_at IS NOT NULL
+                ORDER BY ks.deleted_at DESC
+                LIMIT :limit OFFSET :offset
+            """),
+            {"uid": uid, "limit": limit, "offset": offset},
+        )
+        return [
+            {
+                "space_id":    r.space_id,
+                "name":        r.name,
+                "space_type":  r.space_type,
+                "deleted_at":  r.deleted_at.isoformat() if r.deleted_at else None,
+                "fork_count":  int(r.fork_count or 0),
+                "member_count": int(r.member_count or 0),
+                "fork_from_space_id": r.fork_from_space_id,
+                "can_permanent_delete": (r.fork_count or 0) == 0,
+            }
+            for r in result.fetchall()
+        ]
+
+    async def count_trash_spaces(self, user_id: str) -> int:
+        uid = _uid(user_id)
+        result = await self.db.execute(
+            text("""
+                SELECT COUNT(*) FROM knowledge_spaces
+                WHERE owner_id = CAST(:uid AS uuid) AND deleted_at IS NOT NULL
+            """),
+            {"uid": uid},
+        )
+        row = result.fetchone()
+        return int(row[0]) if row else 0
+
+    async def get_trash_space(
+        self, space_id: str, user_id: str
+    ) -> dict | None:
+        """获取回收站中的单个空间信息（仅 owner 可见）。"""
+        sid = _uid(space_id)
+        uid = _uid(user_id)
+        result = await self.db.execute(
+            text("""
+                SELECT
+                    ks.space_id::text   AS space_id,
+                    ks.name             AS name,
+                    ks.space_type       AS space_type,
+                    ks.deleted_at       AS deleted_at,
+                    ks.fork_from_space_id::text AS fork_from_space_id,
+                    (SELECT COUNT(*) FROM fork_tasks ft
+                     WHERE ft.source_space_id = ks.space_id) AS fork_count
+                FROM knowledge_spaces ks
+                WHERE ks.space_id = CAST(:sid AS uuid)
+                  AND ks.owner_id = CAST(:uid AS uuid)
+                  AND ks.deleted_at IS NOT NULL
+            """),
+            {"sid": sid, "uid": uid},
+        )
+        row = result.fetchone()
+        if not row:
+            return None
+        return {
+            "space_id":    row.space_id,
+            "name":        row.name,
+            "space_type":  row.space_type,
+            "deleted_at":  row.deleted_at.isoformat() if row.deleted_at else None,
+            "fork_count":  int(row.fork_count or 0),
+            "fork_from_space_id": row.fork_from_space_id,
+            "can_permanent_delete": (row.fork_count or 0) == 0,
+        }
+
+    async def count_direct_forks(self, space_id: str) -> int:
+        """统计有多少个空间直接 fork 自本空间。"""
+        sid = _uid(space_id)
+        result = await self.db.execute(
+            text("""
+                SELECT COUNT(*) FROM knowledge_spaces
+                WHERE fork_from_space_id = CAST(:sid AS uuid)
+            """),
+            {"sid": sid},
+        )
+        row = result.fetchone()
+        return int(row[0]) if row else 0
+
+    # -- 硬删除级联清理方法 ---------------------------------------------------
+
+    async def cancel_pending_tasks(self, space_id: str) -> int:
+        """取消该空间所有 pending/running 状态的任务。"""
+        sid = _uid(space_id)
+        result = await self.db.execute(
+            text("""
+                UPDATE task_executions
+                SET status = 'cancelled', updated_at = now()
+                WHERE space_id = CAST(:sid AS uuid)
+                  AND status IN ('pending', 'running')
+                RETURNING execution_id
+            """),
+            {"sid": sid},
+        )
+        return len(result.fetchall())
+
+    async def get_space_documents(self, space_id: str) -> list[str]:
+        """获取空间的所有文档 file_url（用于 MinIO 清理）。"""
+        sid = _uid(space_id)
+        result = await self.db.execute(
+            text("""
+                SELECT f.file_url
+                FROM documents d
+                JOIN files f ON f.file_id = d.file_id
+                WHERE d.space_id = CAST(:sid AS uuid)
+            """),
+            {"sid": sid},
+        )
+        return [r.file_url for r in result.fetchall()]
+
+    async def get_deletion_impact(self, space_id: str) -> dict:
+        """获取空间删除的影响范围数据。"""
+        sid = _uid(space_id)
+        stats = {}
+        queries = {
+            "member_count":         "SELECT COUNT(*) FROM space_members WHERE space_id = CAST(:sid AS uuid)",
+            "entity_count":         "SELECT COUNT(*) FROM knowledge_entities WHERE space_id = CAST(:sid AS uuid)",
+            "document_count":       "SELECT COUNT(*) FROM documents WHERE space_id = CAST(:sid AS uuid)",
+            "discussion_posts":     "SELECT COUNT(*) FROM course_posts WHERE space_id = CAST(:sid AS uuid)",
+            "blueprint_count":      "SELECT COUNT(*) FROM skill_blueprints WHERE space_id = CAST(:sid AS uuid)",
+            "chapter_count":        text("""
+                SELECT COUNT(*) FROM skill_chapters sc
+                JOIN skill_blueprints sb ON sb.blueprint_id = sc.blueprint_id
+                WHERE sb.space_id = CAST(:sid AS uuid)
+            """),
+            "fork_count":           "SELECT COUNT(*) FROM knowledge_spaces WHERE fork_from_space_id = CAST(:sid AS uuid)",
+            "subscription_count":   "SELECT COUNT(*) FROM space_subscriptions WHERE space_id = CAST(:sid AS uuid)",
+        }
+        for key, q in queries.items():
+            result = await self.db.execute(q if isinstance(q, str) else q, {"sid": sid})
+            stats[key] = int(result.fetchone()[0] or 0)
+        return stats
+
+    async def count_document_refs(self, document_id: str) -> int:
+        """统计某文档被多少其他空间引用（通过 space_document_access 表）。"""
+        result = await self.db.execute(
+            text("""
+                SELECT COUNT(*) FROM space_document_access
+                WHERE document_id = CAST(:did AS uuid)
+            """),
+            {"did": _uid(document_id)},
+        )
+        row = result.fetchone()
+        return int(row[0]) if row else 0
+
+    async def find_expired_spaces(self, days: int = 30) -> list[str]:
+        """查找回收站中超过指定天数的空间。"""
+        result = await self.db.execute(
+            text("""
+                SELECT space_id::text FROM knowledge_spaces
+                WHERE deleted_at IS NOT NULL
+                  AND deleted_at < now() - INTERVAL ':days days'
+            """),
+            {"days": days},
+        )
+        return [r[0] for r in result.fetchall()]
 

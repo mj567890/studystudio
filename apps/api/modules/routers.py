@@ -658,8 +658,16 @@ async def get_chapter_source(
                     FROM document_chunks dc
                     JOIN documents d ON d.document_id = dc.document_id
                     JOIN files f     ON f.file_id = d.file_id
-                    WHERE d.space_id = CAST(:space_id AS uuid)
-                      AND dc.embedding IS NOT NULL
+                    WHERE dc.embedding IS NOT NULL
+                      AND d.deleted_at IS NULL
+                      AND (
+                          d.space_id = CAST(:space_id AS uuid)
+                          OR d.document_id IN (
+                              SELECT sda.document_id
+                              FROM space_document_access sda
+                              WHERE sda.space_id = CAST(:space_id AS uuid)
+                          )
+                      )
                     ORDER BY dc.embedding <=> CAST(:qvec AS vector)
                     LIMIT 10
                 """),

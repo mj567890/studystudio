@@ -44,6 +44,66 @@ def _make_session():
                                expire_on_commit=False)
 
 
+async def _grant_document_access(
+    task_id: str,
+    source_space_id: str,
+    target_space_id: str,
+) -> None:
+    """为 fork 空间授权访问源空间的文档（共享文档池，不复制文件）。"""
+    from sqlalchemy import text
+
+    async with _get_session() as session:
+        try:
+            # 获取源空间所有活跃文档
+            rows = await session.execute(
+                text("""
+                    SELECT document_id::text FROM documents
+                    WHERE space_id = CAST(:sid AS uuid)
+                      AND deleted_at IS NULL
+                """),
+                {"sid": source_space_id},
+            )
+            doc_ids = [row[0] for row in rows.fetchall()]
+
+            if not doc_ids:
+                return
+
+            # 批量插入授权记录
+            inserted = 0
+            for doc_id in doc_ids:
+                result = await session.execute(
+                    text("""
+                        INSERT INTO space_document_access
+                            (space_id, document_id, source_space_id)
+                        VALUES
+                            (CAST(:tsid AS uuid),
+                             CAST(:did AS uuid),
+                             CAST(:ssid AS uuid))
+                        ON CONFLICT (space_id, document_id) DO NOTHING
+                        RETURNING id
+                    """),
+                    {
+                        "tsid": target_space_id,
+                        "did":  doc_id,
+                        "ssid": source_space_id,
+                    },
+                )
+                if result.fetchone():
+                    inserted += 1
+
+            await session.commit()
+            logger.info("Document access granted for fork",
+                        task_id=task_id,
+                        source=source_space_id,
+                        target=target_space_id,
+                        doc_count=len(doc_ids),
+                        inserted=inserted)
+        except Exception:
+            await session.rollback()
+            logger.warning("Failed to grant document access for fork",
+                           task_id=task_id, exc_info=True)
+
+
 async def _set_task_status(task_id: str, status: str,
                             error_msg: str | None = None) -> None:
     from sqlalchemy import text
@@ -382,6 +442,11 @@ async def _fork_space_async(task_id: str, source_space_id: str,
                                     "lt":  link["link_type"],
                                 },
                             )
+
+    # ── 授权文档访问（共享源空间文档给 fork 空间）───────────────
+    await _grant_document_access(task_id, source_space_id, target_space_id)
+    logger.info("fork_space_async: document access granted",
+                task_id=task_id, source=source_space_id, target=target_space_id)
 
     # ── 标记任务完成 ────────────────────────────────────────────
     await _set_task_status(task_id, "done")

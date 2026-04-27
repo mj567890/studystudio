@@ -9,7 +9,9 @@ import asyncio
 
 import structlog
 import apps.api.tasks.fork_tasks  # noqa: F401 — 确保 fork_tasks 被 worker 发现
+import apps.api.tasks.cleanup_tasks  # noqa: F401 — 确保 cleanup_tasks 被 worker 发现
 from celery import Celery, signals as celery_signals
+from celery.schedules import crontab
 
 from apps.api.core.config import CONFIG
 from apps.api.tasks.task_tracker import task_tracker, register_tracker_signals
@@ -52,6 +54,7 @@ celery_app.conf.update(
         "apps.api.tasks.knowledge_tasks",
         "apps.api.tasks.auto_review_tasks",
         "apps.api.tasks.embedding_tasks",
+        "apps.api.tasks.cleanup_tasks",
     ],
     task_routes = {
         "apps.api.tasks.tutorial_tasks.generate_skeleton":        {"queue": "tutorial"},
@@ -68,6 +71,8 @@ celery_app.conf.update(
         "apps.api.tasks.fork_tasks.fork_space_task":             {"queue": "low_priority"},
         "apps.api.tasks.blueprint_tasks.regenerate_all_chapters": {"queue": "knowledge"},
         "apps.api.tasks.blueprint_tasks.synthesize_blueprint":      {"queue": "blueprint.synthesis.queue"},
+        "apps.api.tasks.cleanup_tasks.cleanup_expired_spaces":        {"queue": "low_priority"},
+        "apps.api.tasks.cleanup_tasks.cleanup_pending_minio_files":   {"queue": "low_priority"},
     },
     # beat_schedule 已移至下方直接赋值
 )
@@ -82,6 +87,14 @@ celery_app.conf.beat_schedule = {
         "task": "apps.api.tasks.auto_review_tasks.resume_pending_review",
         "schedule": 300.0,
         "options": {"queue": "knowledge.review"},
+    },
+    "cleanup-expired-spaces-daily": {
+        "task": "apps.api.tasks.cleanup_tasks.cleanup_expired_spaces",
+        "schedule": crontab(hour=3, minute=17),  # 每天凌晨 3:17（避开整点高峰）
+    },
+    "retry-minio-cleanup-hourly": {
+        "task": "apps.api.tasks.cleanup_tasks.cleanup_pending_minio_files",
+        "schedule": crontab(minute=7),  # 每小时第 7 分钟
     },
 }
 
