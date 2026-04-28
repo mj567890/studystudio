@@ -290,7 +290,7 @@ async def get_mastery_radar(
         LEFT JOIN learner_knowledge_states lks
                ON lks.entity_id=cel.entity_id AND lks.user_id=CAST(:uid AS uuid)
         LEFT JOIN chapter_progress cp
-               ON cp.chapter_id=sc.chapter_id::text AND cp.user_id=CAST(:uid AS uuid)
+               ON cp.chapter_id=sc.chapter_id AND cp.user_id=CAST(:uid AS uuid)
         WHERE sb.topic_key=:tk AND sb.status='published'
     """
     if space_id:
@@ -417,7 +417,7 @@ async def get_related_recommendations(
             JOIN skill_blueprints sb
                 ON sb.blueprint_id = ss.blueprint_id AND sb.status = 'published'
             LEFT JOIN chapter_progress cp
-                ON cp.chapter_id = sc_tgt.chapter_id::text
+                ON cp.chapter_id = sc_tgt.chapter_id
                AND cp.user_id    = CAST(:uid AS uuid)
                AND cp.completed  = true
             WHERE cel_src.chapter_id = CAST(:chapter_id AS uuid)
@@ -817,7 +817,7 @@ async def download_certificate(
             FROM skill_chapters sc
             JOIN skill_blueprints sb ON sb.blueprint_id = sc.blueprint_id
             JOIN chapter_progress cp
-              ON cp.chapter_id = sc.chapter_id::text
+              ON cp.chapter_id = sc.chapter_id
              AND cp.user_id = CAST(:uid AS uuid)
              AND cp.status = 'read'
             WHERE sb.topic_key = :tk"""
@@ -1514,7 +1514,7 @@ async def get_learner_dashboard(
                sc.title AS chapter_title, ss.title AS stage_title,
                sb.topic_key, sb.title AS blueprint_title
         FROM chapter_progress cp
-        JOIN skill_chapters sc ON sc.chapter_id::text = cp.chapter_id
+        JOIN skill_chapters sc ON sc.chapter_id = cp.chapter_id
         JOIN skill_stages   ss ON ss.stage_id   = sc.stage_id
         JOIN skill_blueprints sb ON sb.blueprint_id = ss.blueprint_id
         WHERE cp.user_id = CAST(:uid AS uuid) AND cp.completed = true
@@ -1567,7 +1567,7 @@ async def get_learner_dashboard(
                sb.topic_key, sb.title AS blueprint_title,
                cp.completed_at
         FROM chapter_progress cp
-        JOIN skill_chapters sc ON sc.chapter_id::text = cp.chapter_id
+        JOIN skill_chapters sc ON sc.chapter_id = cp.chapter_id
         JOIN skill_stages   ss ON ss.stage_id   = sc.stage_id
         JOIN skill_blueprints sb ON sb.blueprint_id = ss.blueprint_id
         WHERE cp.user_id = CAST(:uid AS uuid)
@@ -1591,7 +1591,7 @@ async def get_learner_dashboard(
         JOIN skill_stages   ss ON ss.blueprint_id = sb.blueprint_id
         JOIN skill_chapters sc ON sc.stage_id     = ss.stage_id
         LEFT JOIN chapter_progress cp
-               ON cp.chapter_id = sc.chapter_id::text
+               ON cp.chapter_id = sc.chapter_id
               AND cp.user_id    = CAST(:uid AS uuid)
         WHERE sb.status = 'published'
         GROUP BY sb.topic_key
