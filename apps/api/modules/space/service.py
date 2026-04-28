@@ -75,6 +75,8 @@ class SpaceService:
         name: str,
         space_type: str = "personal",
         description: str | None = None,
+        visibility: str | None = None,
+        allow_fork: bool | None = None,
     ) -> dict:
         import uuid as _uuid
         name = " ".join((name or "").split()).strip()
@@ -105,7 +107,7 @@ class SpaceService:
             return await self.repo.get_space_with_role(row.space_id, user_id)
 
         space_id = str(_uuid.uuid4())
-        await self.repo.create_space(space_id, space_type, user_id, name, description)
+        await self.repo.create_space(space_id, space_type, user_id, name, description, visibility, allow_fork)
         await self.repo.add_member(space_id, user_id, role="owner")
         await self.db.commit()
         logger.info("Space created", space_id=space_id, space_type=space_type, name=name)
@@ -521,7 +523,12 @@ class SpaceService:
         # 按依赖顺序：先删子表引用，再删主表
         delete_queries = [
             # 通知
-            ("DELETE FROM user_notifications WHERE target_type='space' AND target_id=CAST(:sid AS text)", {}),
+            _t("DELETE FROM user_notifications WHERE target_type='space' AND target_id=CAST(:sid AS uuid)"),
+            # 对话轮次（需先于 conversations 删除）
+            _t("DELETE FROM conversation_turns WHERE conversation_id IN "
+               "(SELECT conversation_id FROM conversations WHERE space_id = CAST(:sid AS uuid))"),
+            # 对话
+            _t("DELETE FROM conversations WHERE space_id = CAST(:sid AS uuid)"),
             # 讨论回复
             _t("DELETE FROM course_post_replies WHERE post_id IN "
                "(SELECT post_id FROM course_posts WHERE space_id = CAST(:sid AS uuid))"),
@@ -534,8 +541,6 @@ class SpaceService:
             _t("DELETE FROM wall_posts WHERE space_id = CAST(:sid AS uuid)"),
             # 社区策展
             _t("DELETE FROM community_curations WHERE space_id = CAST(:sid AS uuid)"),
-            # 对话
-            _t("DELETE FROM conversations WHERE space_id = CAST(:sid AS uuid)"),
             # 笔记实体链接（通过 entity -> space 关联）
             _t("DELETE FROM note_entity_links WHERE entity_id IN "
                "(SELECT entity_id FROM knowledge_entities WHERE space_id = CAST(:sid AS uuid))"),
@@ -547,10 +552,6 @@ class SpaceService:
                "(SELECT entity_id FROM knowledge_entities WHERE space_id = CAST(:sid AS uuid))"),
             # 测验（通过 chapter -> blueprint -> space 关联）
             _t("DELETE FROM chapter_quiz_attempts WHERE chapter_id IN "
-               "(SELECT chapter_id::text FROM skill_chapters sc "
-               "JOIN skill_blueprints sb ON sb.blueprint_id = sc.blueprint_id "
-               "WHERE sb.space_id = CAST(:sid AS uuid))"),
-            _t("DELETE FROM chapter_quizzes WHERE chapter_id IN "
                "(SELECT chapter_id::text FROM skill_chapters sc "
                "JOIN skill_blueprints sb ON sb.blueprint_id = sc.blueprint_id "
                "WHERE sb.space_id = CAST(:sid AS uuid))"),
@@ -575,12 +576,19 @@ class SpaceService:
             _t("DELETE FROM skill_stages WHERE blueprint_id IN "
                "(SELECT blueprint_id FROM skill_blueprints WHERE space_id = CAST(:sid AS uuid))"),
             _t("DELETE FROM skill_blueprints WHERE space_id = CAST(:sid AS uuid)"),
+            # tutorial_contents（需先于 tutorial_skeletons 删除）
+            _t("DELETE FROM tutorial_contents WHERE tutorial_id IN "
+               "(SELECT tutorial_id FROM tutorial_skeletons WHERE space_id = CAST(:sid AS uuid))"),
             _t("DELETE FROM tutorial_skeletons WHERE space_id = CAST(:sid AS uuid)"),
-            # 知识点关系
+            # 知识点关系（含临时表）
             _t("DELETE FROM knowledge_relations WHERE source_entity_id IN "
+               "(SELECT entity_id FROM knowledge_entities WHERE space_id = CAST(:sid AS uuid))"),
+            _t("DELETE FROM knowledge_relations_temp WHERE source_entity_id IN "
                "(SELECT entity_id FROM knowledge_entities WHERE space_id = CAST(:sid AS uuid))"),
             # 知识点
             _t("DELETE FROM knowledge_entities WHERE space_id = CAST(:sid AS uuid)"),
+            # 临时表（提取过程中的中间数据）
+            _t("DELETE FROM knowledge_entities_temp WHERE space_id = CAST(:sid AS uuid)"),
             # 文档分块
             _t("DELETE FROM document_chunks WHERE document_id IN "
                "(SELECT document_id FROM documents WHERE space_id = CAST(:sid AS uuid))"),
@@ -601,12 +609,10 @@ class SpaceService:
 
         for q in delete_queries:
             try:
-                if isinstance(q, tuple):
-                    await self.db.execute(_t(q[0]), {"sid": sid, **q[1]})
-                else:
+                async with self.db.begin_nested():
                     await self.db.execute(q, {"sid": sid})
             except Exception:
-                pass  # 表可能不存在，跳过
+                pass  # 表可能不存在，savepoint 自动回滚，继续下一个
 
         # 删除空间本身
         await self.db.execute(

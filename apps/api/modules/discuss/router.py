@@ -242,6 +242,85 @@ async def delete_reply(
     return {"code": 200, "msg": "success", "data": {}}
 
 
+# ── 源课程讨论引用（Fork 空间只读）──────────────────────────────
+
+@router.get("/spaces/{space_id}/source-posts")
+async def list_source_posts(
+    space_id: str,
+    chapter_id: str | None = Query(None),
+    limit: int = 20,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """返回 Fork 源空间对应章节的讨论帖（只读引用）。
+
+    仅当该空间是 Fork 空间时返回数据；原创空间返回空列表。
+    支持链式 Fork：沿 fork_from_space_id 追溯到最初源空间。
+    """
+    # 1. 查找源空间
+    row = await db.execute(text("""
+        WITH RECURSIVE fork_chain AS (
+            SELECT space_id, fork_from_space_id, name, 1 AS depth
+            FROM knowledge_spaces
+            WHERE space_id = CAST(:space_id AS uuid) AND fork_from_space_id IS NOT NULL
+            UNION ALL
+            SELECT ks.space_id, ks.fork_from_space_id, ks.name, fc.depth + 1
+            FROM knowledge_spaces ks
+            JOIN fork_chain fc ON ks.space_id = fc.fork_from_space_id
+        )
+        SELECT space_id::text, name, depth
+        FROM fork_chain
+        ORDER BY depth DESC
+        LIMIT 1
+    """), {"space_id": space_id})
+    source = row.fetchone()
+    if not source:
+        return {"code": 200, "msg": "success", "data": {"source_space_name": "", "posts": []}}
+
+    # 2. 查询源空间对应章节的帖子和回复数
+    params: dict = {"space_id": source.space_id, "limit": limit}
+    chapter_filter = ""
+    if chapter_id:
+        chapter_filter = " AND p.chapter_id = CAST(:chapter_id AS uuid)"
+        params["chapter_id"] = chapter_id
+
+    rows = await db.execute(text(f"""
+        SELECT p.post_id::text, p.chapter_id::text, p.user_id::text,
+               p.post_type, p.title, p.content,
+               p.reply_count, p.created_at, p.updated_at,
+               u.nickname AS username, u.avatar_url
+        FROM course_posts p
+        JOIN users u ON u.user_id = p.user_id
+        WHERE p.space_id = CAST(:space_id AS uuid)
+          {chapter_filter}
+        ORDER BY p.reply_count DESC, p.created_at DESC
+        LIMIT :limit
+    """), params)
+
+    posts = [
+        {
+            "post_id":       r.post_id,
+            "chapter_id":    r.chapter_id,
+            "user_id":       r.user_id,
+            "username":      r.username,
+            "avatar_url":    r.avatar_url,
+            "post_type":     r.post_type,
+            "title":         r.title,
+            "content":       r.content,
+            "reply_count":   r.reply_count,
+            "created_at":    r.created_at.isoformat(),
+            "updated_at":    r.updated_at.isoformat(),
+            "is_source":     True,
+        }
+        for r in rows.fetchall()
+    ]
+    return {"code": 200, "msg": "success", "data": {
+        "source_space_name": source.name,
+        "source_space_id":   source.space_id,
+        "posts":             posts,
+    }}
+
+
 # ── 我加入的课程的最新动态（聚合 feed）──────────────────────────
 
 @router.get("/feed")

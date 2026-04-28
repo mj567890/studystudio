@@ -1151,14 +1151,24 @@ async def list_course_chapters(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(require_role("admin")),
 ) -> dict:
-    """获取课程下所有章节，按 stage 分组。"""
+    """获取课程下所有章节，按 stage 分组。返回 topic_key 供前端跳转。"""
     from sqlalchemy.exc import ProgrammingError
     from apps.api.modules.skill_blueprint.repository import BlueprintRepository
     try:
+        # 查询 blueprint 的 topic_key + space_id
+        bp_row = await db.execute(text("""
+            SELECT sb.topic_key, sb.space_id::text
+            FROM skill_blueprints sb
+            WHERE sb.blueprint_id = CAST(:bid AS uuid)
+        """), {"bid": blueprint_id})
+        bp = bp_row.fetchone()
+        topic_key = bp.topic_key if bp else ""
+        space_id = bp.space_id if bp else ""
+
         repo = BlueprintRepository(db)
         stages_raw = await repo.get_stages(blueprint_id)
     except ProgrammingError:
-        return {"code": 200, "data": {"stages": []}}
+        return {"code": 200, "data": {"topic_key": "", "space_id": "", "stages": []}}
     stages = []
     for s in stages_raw:
         chapters_raw = await repo.get_chapters(s["stage_id"])
@@ -1179,7 +1189,7 @@ async def list_course_chapters(
             "stage_order": s["stage_order"],
             "chapters": chapters,
         })
-    return {"code": 200, "data": {"stages": stages}}
+    return {"code": 200, "data": {"topic_key": topic_key, "space_id": space_id, "stages": stages}}
 
 
 @router.post("/admin/courses/chapters/{chapter_id}/regenerate")
@@ -1376,6 +1386,53 @@ async def reparse_document(
         return {"code": 500, "msg": f"解析失败：{e}"}
     finally:
         tmp_path.unlink(missing_ok=True)
+
+
+@router.post("/admin/documents/backfill-page-no")
+async def backfill_page_no(
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_role("admin")),
+) -> dict:
+    """一键补全 document_chunks 中缺失的 page_no。
+
+    - 非 PDF 文档：直接 UPDATE page_no = 1（单页全文）
+    - PDF 文档：返回需要手动重解析的文档列表（需从原始文件提取）
+    """
+    # 非 PDF 文档批量补全（单页文件 page_no=1 即可）
+    result = await db.execute(text("""
+        UPDATE document_chunks dc
+        SET page_no = 1
+        WHERE dc.page_no IS NULL
+          AND dc.document_id IN (
+              SELECT d.document_id FROM documents d
+              JOIN files f ON f.file_id = d.file_id
+              WHERE f.file_type NOT ILIKE '%pdf%'
+          )
+    """))
+    non_pdf_fixed = result.rowcount
+
+    # 统计仍需手动处理的 PDF 文档
+    pdf_rows = await db.execute(text("""
+        SELECT d.document_id::text, d.file_name, f.file_type
+        FROM documents d
+        JOIN files f ON f.file_id = d.file_id
+        WHERE f.file_type ILIKE '%pdf%'
+          AND EXISTS (
+              SELECT 1 FROM document_chunks dc
+              WHERE dc.document_id = d.document_id AND dc.page_no IS NULL
+          )
+    """))
+    pdf_docs = [dict(r._mapping) for r in pdf_rows.fetchall()]
+
+    await db.commit()
+
+    return {"code": 200, "msg": "success", "data": {
+        "non_pdf_fixed": non_pdf_fixed,
+        "pdf_pending":   len(pdf_docs),
+        "pdf_docs":      pdf_docs,
+    }}
+
+
 @router.get("/files/all-documents")
 async def get_all_documents(
     status:       str | None = None,

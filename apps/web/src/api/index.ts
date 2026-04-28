@@ -210,6 +210,7 @@ export const adminApi = {
   getAllDocuments: (params?: { status?: string; space_type?: string; page?: number; page_size?: number; sort_by?: string; sort_order?: string }) =>
     http.get('/files/all-documents', { params }),
   reparseDocument: (documentId: string) => http.post(`/files/reparse/${documentId}`),
+  backfillPageNo:   ()    => http.post('/admin/documents/backfill-page-no'),
   getStats:         ()    => http.get('/admin/system/stats'),
 
   // 任务管理
@@ -364,6 +365,8 @@ export const discussApi = {
     http.delete(`/discuss/replies/${replyId}`),
   feed: (limit = 30) =>
     http.get('/discuss/feed', { params: { limit } }),
+  listSourcePosts: (spaceId: string, params?: { chapter_id?: string; limit?: number }) =>
+    http.get(`/discuss/spaces/${spaceId}/source-posts`, { params }),
 }
 
 

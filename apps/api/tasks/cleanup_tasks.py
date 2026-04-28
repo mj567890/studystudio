@@ -101,7 +101,7 @@ async def _cleanup_expired_spaces_async():
             # 收集文件 URL（用于课后 MinIO 清理）
             file_urls_result = await session.execute(
                 text("""
-                    SELECT f.file_url FROM documents d
+                    SELECT f.storage_url FROM documents d
                     JOIN files f ON f.file_id = d.file_id
                     WHERE d.space_id = CAST(:sid AS uuid)
                       AND d.deleted_at IS NULL

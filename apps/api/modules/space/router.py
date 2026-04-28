@@ -24,6 +24,8 @@ class CreateSpaceRequest(BaseModel):
     name:        str = Field(min_length=1, max_length=255)
     space_type:  str = Field(default="personal", pattern="^(global|personal|course)$")
     description: Optional[str] = Field(default=None)
+    visibility:  Optional[str] = Field(default="private", pattern="^(private|shared|public)$")
+    allow_fork:  Optional[bool] = Field(default=False)
 
 class UpdateSpaceRequest(BaseModel):
     name:        Optional[str] = Field(default=None, max_length=255)
@@ -64,7 +66,8 @@ async def create_space(
     service = SpaceService(db)
     try:
         data = await service.create_space(
-            current_user["user_id"], req.name, req.space_type, req.description
+            current_user["user_id"], req.name, req.space_type,
+            req.description, req.visibility, req.allow_fork
         )
     except SpaceError as e:
         _raise_http(e)
@@ -159,6 +162,30 @@ async def list_public_spaces(
         for r in rows
     ]
     return {"code": 200, "msg": "success", "data": {"spaces": spaces, "total": total}}
+
+
+@router.get("/spaces/trash")
+async def list_trash(
+    limit:  int = 20,
+    offset: int = 0,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession   = Depends(get_db),
+) -> dict:
+    """回收站列表（仅自己拥有的空间）。"""
+    service = SpaceService(db)
+    data = await service.list_trash_spaces(current_user["user_id"], limit, offset)
+    return {"code": 200, "msg": "success", "data": data}
+
+
+@router.delete("/spaces/trash")
+async def empty_trash(
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession   = Depends(get_db),
+) -> dict:
+    """清空回收站——彻底删除所有可删除空间。"""
+    service = SpaceService(db)
+    data = await service.empty_trash(current_user["user_id"])
+    return {"code": 200, "msg": "回收站已清空", "data": data}
 
 
 @router.get("/spaces/{space_id}")
@@ -765,19 +792,6 @@ async def delete_space(
     return {"code": 200, "msg": "已移入回收站", "data": data}
 
 
-@router.get("/spaces/trash")
-async def list_trash(
-    limit:  int = 20,
-    offset: int = 0,
-    current_user: dict = Depends(get_current_user),
-    db: AsyncSession   = Depends(get_db),
-) -> dict:
-    """回收站列表（仅自己拥有的空间）。"""
-    service = SpaceService(db)
-    data = await service.list_trash_spaces(current_user["user_id"], limit, offset)
-    return {"code": 200, "msg": "success", "data": data}
-
-
 @router.post("/spaces/{space_id}/restore")
 async def restore_space(
     space_id: UUID,
@@ -808,17 +822,6 @@ async def permanent_delete_space(
     except SpaceError as e:
         _raise_http(e)
     return {"code": 200, "msg": "已彻底删除", "data": data}
-
-
-@router.delete("/spaces/trash")
-async def empty_trash(
-    current_user: dict = Depends(get_current_user),
-    db: AsyncSession   = Depends(get_db),
-) -> dict:
-    """清空回收站——彻底删除所有可删除空间。"""
-    service = SpaceService(db)
-    data = await service.empty_trash(current_user["user_id"])
-    return {"code": 200, "msg": "回收站已清空", "data": data}
 
 
 @router.get("/spaces/{space_id}/deletion-impact")

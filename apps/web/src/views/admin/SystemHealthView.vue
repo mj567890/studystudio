@@ -612,7 +612,7 @@
                       </div>
                     </template>
                   </el-table-column>
-                  <el-table-column label="操作" width="130" align="center">
+                  <el-table-column label="操作" width="170" align="center">
                     <template #default="{ row }">
                       <el-button
                         v-if="row.suggested_action && row.suggested_action !== 'retry_ingest'"
@@ -624,6 +624,12 @@
                       <el-tooltip v-else-if="row.suggested_action === 'retry_ingest'" content="请在文件管理页面使用重新解析功能">
                         <el-tag size="small" type="info">需重新上传</el-tag>
                       </el-tooltip>
+                      <el-button
+                        size="small"
+                        text
+                        type="warning"
+                        @click="goToTasksForPipeline()"
+                      >查看任务</el-button>
                     </template>
                   </el-table-column>
                 </el-table>
@@ -648,10 +654,13 @@
                     </template>
                   </el-table-column>
                   <el-table-column label="错误提示" prop="error_hint" min-width="200" />
-                  <el-table-column label="操作" width="80" align="center">
+                  <el-table-column label="操作" width="140" align="center">
                     <template #default="{ row }">
                       <el-button size="small" type="primary" text @click="retryDocument(row.document_id, 'retry_extraction')">
                         重试
+                      </el-button>
+                      <el-button size="small" text type="warning" @click="goToTasksForPipeline()">
+                        查看任务
                       </el-button>
                     </template>
                   </el-table-column>
@@ -943,7 +952,7 @@ function goToRunningTasks() {
 }
 
 function goToTasksForPipeline() {
-  router.push('/admin/tasks')
+  router.push('/admin/tasks?status=failed')
 }
 
 // ── 管线告警数据（直接来自主 health 响应，无需额外请求）──

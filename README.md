@@ -79,10 +79,11 @@
 <td width="50%">
 
 ### 👥 社交学习
-- 多人知识空间 + 邀请码
+- 多人知识空间 + 邀请码 + 公开分级
+- Fork 课程空间，引用源课程讨论
 - 课程讨论区（话题 / 问答 / 笔记）
 - 社区发现公开课程
-- 学习进度共享
+- 回收站机制（软删除 / 恢复 / 定时清理）
 
 </td>
 </tr>
@@ -151,7 +152,7 @@
 
 | 层级 | 技术 | 说明 |
 |:---|:---|:---|
-| **前端** | Vue 3 + TypeScript · Vite · Element Plus · Pinia | SPA 单页应用 |
+| **前端** | Vue 3 + TypeScript · Vite · Element Plus · Pinia | SPA 单页应用，chunk 拆分优化 |
 | **后端** | FastAPI · SQLAlchemy 2.0 (async) · Pydantic v2 | 异步 Web 框架 |
 | **数据库** | PostgreSQL 15 + pgvector | 关系型 + 向量检索 |
 | **缓存** | Redis 7 | KV 存储 + 分布式锁 |
@@ -248,12 +249,12 @@ studystudio/
 │   │       └── embedding_tasks.py  # 向量化任务
 │   └── web/                        # Vue 3 前端
 │       └── src/
-│           ├── views/              # 页面组件（27 个）
+│           ├── views/              # 页面组件（30 个）
 │           ├── components/         # 通用组件
 │           ├── api/                # API 调用封装
 │           ├── stores/             # Pinia 状态管理
 │           └── router/             # 路由配置
-├── migrations/                     # 数据库迁移 SQL（23 个版本）
+├── migrations/                     # 数据库迁移 SQL（27 个版本）
 ├── scripts/                        # 工具脚本
 ├── devdocs/                        # 开发文档 & 架构说明
 └── docker-compose.yml

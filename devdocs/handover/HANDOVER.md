@@ -1,7 +1,7 @@
 # StudyStudio 会话交接文档
 
-**生成日期：** 2026-04-27
-**上次更新主题：** 会话后继推进 — 密钥轮换验证、前端重构建、JWT 强化、Auth 单元测试(43)、管理面板合并评估
+**生成日期：** 2026-04-28
+**上次更新主题：** 旧文档 page_no 补全 + 前端 chunk 拆分优化（element-plus/vue-vendor 独立缓存）
 
 ---
 
@@ -361,13 +361,277 @@
 
 ---
 
+## 三-E、本次会话完成工作（2026-04-28 删除功能验证 + FK补齐 + 联动增强）
+
+### 环境准备
+
+- Docker Desktop 启动，10 个容器全部正常运行
+- 3 个缺失迁移手动补齐（022 schema_migrations 表、024 软删除+allow_fork、025 文档共享引用表）
+- 迁移追踪表 `schema_migrations` 现已完整（001-026）
+
+### 删除功能验证与 6 个 Bug 修复
+
+详见 `devdocs/删除功能验证与修复_20260428.md`
+
+| # | Bug | 位置 | 修复 |
+|---|-----|------|------|
+| 1 | 回收站路由被 `{space_id}` 拦截 | `router.py` | 静态路由移到参数路由之前 |
+| 2 | `deletion-impact` raw SQL 未用 `text()` | `repository.py` | 全部包裹 `text()` |
+| 3 | `chapter_quizzes` 表不存在导致级联删除事务中止 | `service.py` | 删除不存在表引用 + savepoint隔离 + 补充缺失表 + `file_url`→`storage_url` |
+| 4 | 创建空间不接受 `visibility`/`allow_fork` | router/service/repo 三层 | 补齐参数传递链 + INSERT 列 |
+| 5 | `get_space_with_role` 未 SELECT `allow_fork`/`deleted_at` | `repository.py` SQL | 增加 SELECT 列 |
+| 6 | `DeleteConfirmDialog.vue` 文件损坏（AI对话残余+computed未导入） | 组件 | 重写组件 |
+
+所有修复经 API 端点验证通过，前端重新构建成功。
+
+### 迁移 026：衍生表 FK 约束补齐
+
+- 诊断 SQL：9 张包含 `chapter_id` 的表，无孤儿数据
+- 7 张表 VARCHAR→UUID 类型转换（`learner_notes` 需 DROP DEFAULT + DROP NOT NULL）
+- 9 张表添加 FK → `skill_chapters(chapter_id)`，8 张 ON DELETE CASCADE，1 张 ON DELETE SET NULL
+- 9 个新索引加速 JOIN/级联删除
+
+### 队列联动增强
+
+- `SystemHealthView` 管线告警"查看相关任务" → `/admin/tasks?status=failed`（之前无参数）
+- 卡住文档/最近失败表格每行增加"查看任务"按钮，统一跳转带 `?status=failed`
+- `TaskManagementView` 已有的 `?status=` 参数直接复用，无需改动
+
+### 变更文件一览
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `apps/api/modules/space/router.py` | 修复 | 路由顺序 + CreateSpaceRequest 字段补齐 |
+| `apps/api/modules/space/service.py` | 修复 | 创建参数 + 级联删除表修正 + savepoint |
+| `apps/api/modules/space/repository.py` | 修复 | text() 包裹 + storage_url + INSERT/SELECT 字段补齐 |
+| `apps/api/tasks/cleanup_tasks.py` | 修复 | file_url → storage_url |
+| `apps/web/src/components/DeleteConfirmDialog.vue` | 重写 | 修复文件损坏 |
+| `apps/web/src/views/admin/SystemHealthView.vue` | 增强 | 查看任务联动 + status=failed 参数 |
+| `migrations/026_chapter_fk_constraints.sql` | **新增** | 9 表 FK 补齐 |
+| `apps/web/dist/` | 重构建 | 1747 模块 |
+
+---
+
+## 三-F、本次会话完成工作（2026-04-28 生产部署同步）
+
+### 服务器代码同步
+
+- 上传 4 个缺失迁移文件（023-026）到服务器
+- 上传本次会话修复的全部源代码：
+  - `space/router.py`、`space/service.py`、`space/repository.py`（Bug 1-5 修复）
+  - `tasks/cleanup_tasks.py`（file_url → storage_url）
+- 上传最新前端 dist（1747 模块，含 TrashView + 队列联动）
+
+### 迁移补齐
+
+- 服务器原有迁移 001-021，缺失 023-026
+- 通过 `cat migrations/*.sql | docker compose exec -T postgres psql` 逐文件执行
+- 迁移 026 首次执行失败：`chapter_quiz_attempts` 等 5 表存在 2252 行孤儿数据（chapter_id 不在 skill_chapters 中）
+- 清理 5 表孤儿数据（DELETE）后重新执行，全部通过
+- `schema_migrations` 表已记录 023-026
+
+### 容器操作
+
+- 重启 api + 3 个 celery worker 容器（加载新代码）
+- 前端 dist 通过 `docker compose cp` 推入 web 容器 + nginx reload
+
+### 验证结果
+
+| 检查项 | 结果 |
+|--------|------|
+| API 健康检查 | `{"status":"ok","version":"1.0.0","env":"production"}` |
+| 前端 HTTP 状态 | 200 |
+| 迁移记录 | 26 条完整（001-026，缺 004 为设计如此） |
+| 回收站路由 | 返回 AUTH_001（路由正确注册，非 404/500） |
+| 全部 10 容器 | healthy / running |
+
+### 变更文件清单
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `migrations/023-026` | 上传 | 4 个缺失迁移 |
+| `apps/api/modules/space/` | 上传 | Bug 1-5 修复 |
+| `apps/api/tasks/cleanup_tasks.py` | 上传 | storage_url 修复 |
+| `apps/web/dist/` | 上传 | 1747 模块最新构建 |
+
+### 生产验收（2026-04-28）
+
+**测试账号：** `test-delete@example.com`（已清理）
+
+**端点验证（全部通过）：**
+
+| # | 端点 | 结果 |
+|---|------|------|
+| 1 | `POST /spaces` (visibility=public, allow_fork=true) | 200, 返回正确字段 |
+| 2 | `GET /spaces/{id}` (verify allow_fork/visibility) | public + True ✅ |
+| 3 | `DELETE /spaces/{id}` (soft delete) | 200, 进入回收站 |
+| 4 | `GET /spaces/trash` | 200, 含已删除空间 |
+| 5 | `POST /spaces/{id}/restore` | 200, 字段完整恢复 |
+| 6 | `GET /spaces/{id}/deletion-impact` | 200, 7 项统计 |
+| 7 | `GET /spaces/{id}/public-info` | 200, requires_confirmation=True |
+| 8 | `DELETE /spaces/trash` (永久删除) | 200, 仅删当前用户 |
+| 9 | 验证已删除 | 404 ✅ |
+| 10 | 前端 `/trash` 路由 | 200 ✅ |
+
+**结论：** 删除功能全链路在生产环境运行正常，6 个 Bug 修复均已生效。
+
+### 服务器修复记录（与本地不同）
+
+| 问题 | 本地 | 服务器 |
+|------|------|--------|
+| 迁移 026 孤儿数据 | 全表为空，直接通过 | 5 表 2252 行孤儿，需先 DELETE |
+| SSH 用户 | — | 实际用户为 `thclaw`（非 root），`~/.ssh/id_rsa` |
+| web 容器 dist | — | 无 volume，需 `docker compose cp` 或 rebuild |
+
+---
+
+## 三-G、本次会话完成工作（2026-04-28 Phase 5 源课程讨论引用）
+
+### 需求
+
+Fork 空间章节页可"引用显示"源空间对应章节的讨论（只读），解决 Fork 用户面对"空城"问题。
+
+### 设计方案
+
+- **不复制讨论数据**：Fork 空间保持独立空讨论区
+- **只读引用**：通过 API 查询源空间讨论，前端标记展示
+- **链式 Fork 支持**：递归 CTE 沿 `fork_from_space_id` 追溯到最初源空间
+- **章节过滤**：支持 `chapter_id` 参数，只显示对应章节讨论
+
+### 后端实现
+
+**新端点：** `GET /api/discuss/spaces/{space_id}/source-posts`
+
+- 参数：`chapter_id`（可选）、`limit`（默认 20）
+- 使用递归 CTE 追溯 Fork 链到源空间
+- 非 Fork 空间返回空列表
+- 帖子标记 `is_source: true` + `source_space_name`
+
+**修改文件：** `apps/api/modules/discuss/router.py`（+65 行）
+
+### 前端实现
+
+**API 层：** `api/index.ts` — 新增 `discussApi.listSourcePosts()`
+
+**UI 层：** `WallSection.vue`
+- 章节切换时并行加载本地帖 + 源课程帖
+- 源课程帖以独立区域展示（"📖 来自源课程「{name}」的讨论"）
+- 帖子卡片带"源课程"灰色标签
+- 帖子详情可查看回复，但隐藏回复输入框（只读提示）
+- 无源帖时零影响（不显示该区域）
+
+### 生产验证
+
+| 测试项 | 结果 |
+|--------|------|
+| 非 Fork 空间 source-posts | 返回空列表 |
+| Fork 空间 source-posts | 正确追溯源空间 + 返回帖子 |
+| 链式 Fork（二级） | 递归 CTE 追溯到最初源空间 |
+| 前端构建 | 1747 模块，6.89s |
+
+### 变更文件清单
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `apps/api/modules/discuss/router.py` | 新增 | source-posts 端点（递归 CTE） |
+| `apps/web/src/api/index.ts` | 新增 | discussApi.listSourcePosts |
+| `apps/web/src/components/WallSection.vue` | 增强 | 源课程帖加载 + 只读展示 |
+| `apps/web/dist/` | 部署 | 生产服务器已更新 |
+
+---
+
 ## 四、待开发
 
-### 下次会话首要任务
+---
 
-1. **生产环境部署完成**：服务器构建完成后，启动服务验证 → 健康检查 → 前端/API 可达性
-2. **升级后验证**：确认所有容器正常运行，管线功能可用
-3. **SystemHealthView 队列联动增强**：工作队列 Tab 中挂起任务跳转到 TaskManagementView
+## 三-H、本次会话完成工作（2026-04-28 管理面板章节预览深链接）
+
+### 需求
+
+管理员在 KnowledgeView「课程管理」Tab 查看章节时，无法直接预览该章节在教程页的展示效果。原有"学习"按钮只能跳转到课程首页，不能定位到具体章节。
+
+### 解决方案
+
+不建新表，利用已有 `topic_key` 打通管理面板和教程页：
+
+**后端：**
+- `GET /admin/courses/{blueprint_id}/chapters` 新增返回 `topic_key` + `space_id`
+- 查询 `skill_blueprints` 表获取对应值（仅 1 次额外查询）
+
+**前端 KnowledgeView：**
+- 章节抽屉每行新增"预览"按钮（绿色，在"重生成"左侧）
+- `previewChapter()` 跳转 `/tutorial?topic={topicKey}&chapter={chapterId}`
+
+**前端 TutorialView：**
+- 新增 `chapter` 查询参数支持（优先级最高：query > localStorage cross-topic > localStorage saved）
+- `selectChapter` 中 `nextTick` + `scrollIntoView` 自动滚动到选中章节
+
+### 变更文件
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `apps/api/modules/admin/router.py` | 修改 | chapters 端点返回 topic_key + space_id |
+| `apps/web/src/views/admin/KnowledgeView.vue` | 增强 | 预览按钮 + previewChapter + previewTopicKey |
+| `apps/web/src/views/tutorial/TutorialView.vue` | 增强 | chapter 查询参数 + nextTick 滚动 |
+| `apps/web/dist/` | 部署 | 生产服务器已更新 |
+
+---
+
+## 三-I、本次会话完成工作（2026-04-28 收尾优化）
+
+### 1. 旧文档 page_no 一键补全
+
+**问题：** 迁移 017 之前处理的文档 `document_chunks.page_no IS NULL`，精读原文功能无法显示页码。
+
+**方案：**
+- 新增 `POST /admin/documents/backfill-page-no` 端点（admin 角色）
+- 非 PDF 文档：`UPDATE document_chunks SET page_no = 1`（单页全文）
+- PDF 文档：返回需手动重解析的文档列表
+- 前端 KnowledgeView「文档管理」Tab 新增"补全页码"按钮
+
+**变更：**
+| 文件 | 变更 |
+|------|------|
+| `apps/api/modules/admin/router.py` | 新增 backfill-page-no 端点 |
+| `apps/web/src/api/index.ts` | adminApi.backfillPageNo() |
+| `apps/web/src/views/admin/KnowledgeView.vue` | 补全页码按钮 + backfilling 状态 |
+
+**生产状态：** 服务器文档数据已清洁（无 null page_no），端点可直接使用。
+
+### 2. 前端 chunk 拆分优化
+
+**问题：** 主入口 `index.js` 达 1,222 kB，每次发版缓存全部失效。
+
+**方案：** `vite.config.ts` 配置 `manualChunks`：
+- `element-plus` → 独立 chunk（1,044 kB，UI 库变更少）
+- `vue` + `vue-router` + `pinia` → `vue-vendor` chunk（121 kB）
+
+**效果：**
+
+| chunk | 优化前 | 优化后 |
+|-------|--------|--------|
+| index（主入口） | 1,222 kB | **56 kB** |
+| element-plus | 合并 | 1,044 kB |
+| vue-vendor | 合并 | 121 kB |
+
+主入口缩减 95%，vendor 独立缓存。
+
+**变更：** `apps/web/vite.config.ts`（+14 行）
+
+### 后续参考
+
+全部计划任务已完成：
+
+- ✅ 生产环境部署 + 验证
+- ✅ 删除功能全链路（6 Bug 修复 + 迁移 026 + 验收）
+- ✅ Phase 5 源课程讨论引用
+- ✅ 管理面板章节课时关联
+- ✅ 旧文档 page_no 补全
+- ✅ 前端 chunk 拆分优化
+
+**可选后续工作：**
+- 旧文档 page_no 为 null（管理员逐一重解析）
+- 前端大 chunk 拆分优化（构建警告）
 
 ---
 
@@ -467,5 +731,5 @@
 
 ---
 
-*文档版本：v15.0*
-*生成时间：2026-04-27*
+*文档版本：v20.0*
+*生成时间：2026-04-28*

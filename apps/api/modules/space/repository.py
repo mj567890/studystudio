@@ -70,6 +70,8 @@ class SpaceRepository:
                     ks.created_at       AS created_at,
                     ks.updated_at       AS updated_at,
                     ks.fork_from_space_id::text AS fork_from_space_id,
+                    ks.allow_fork       AS allow_fork,
+                    ks.deleted_at       AS deleted_at,
                     sm.role             AS my_role,
                     (SELECT count(*) FROM space_members sm2
                      WHERE sm2.space_id = ks.space_id) AS member_count
@@ -178,19 +180,23 @@ class SpaceRepository:
         owner_id: str,
         name: str,
         description: str | None,
+        visibility: str | None = None,
+        allow_fork: bool | None = None,
     ) -> None:
         await self.db.execute(
             text("""
                 INSERT INTO knowledge_spaces
-                    (space_id, space_type, owner_id, name, description)
+                    (space_id, space_type, owner_id, name, description, visibility, allow_fork)
                 VALUES (
                     CAST(:sid AS uuid), :space_type,
-                    CAST(:owner_id AS uuid), :name, :description
+                    CAST(:owner_id AS uuid), :name, :description,
+                    COALESCE(:visibility, 'private'), COALESCE(:allow_fork, FALSE)
                 )
                 ON CONFLICT (space_id) DO NOTHING
             """),
             {"sid": space_id, "space_type": space_type,
-             "owner_id": owner_id, "name": name, "description": description},
+             "owner_id": owner_id, "name": name, "description": description,
+             "visibility": visibility, "allow_fork": allow_fork},
         )
 
     # -- 变更 ----------------------------------------------------------------
@@ -604,39 +610,39 @@ class SpaceRepository:
         return len(result.fetchall())
 
     async def get_space_documents(self, space_id: str) -> list[str]:
-        """获取空间的所有文档 file_url（用于 MinIO 清理）。"""
+        """获取空间的所有文档 storage_url（用于 MinIO 清理）。"""
         sid = _uid(space_id)
         result = await self.db.execute(
             text("""
-                SELECT f.file_url
+                SELECT f.storage_url
                 FROM documents d
                 JOIN files f ON f.file_id = d.file_id
                 WHERE d.space_id = CAST(:sid AS uuid)
             """),
             {"sid": sid},
         )
-        return [r.file_url for r in result.fetchall()]
+        return [r.storage_url for r in result.fetchall()]
 
     async def get_deletion_impact(self, space_id: str) -> dict:
         """获取空间删除的影响范围数据。"""
         sid = _uid(space_id)
         stats = {}
         queries = {
-            "member_count":         "SELECT COUNT(*) FROM space_members WHERE space_id = CAST(:sid AS uuid)",
-            "entity_count":         "SELECT COUNT(*) FROM knowledge_entities WHERE space_id = CAST(:sid AS uuid)",
-            "document_count":       "SELECT COUNT(*) FROM documents WHERE space_id = CAST(:sid AS uuid)",
-            "discussion_posts":     "SELECT COUNT(*) FROM course_posts WHERE space_id = CAST(:sid AS uuid)",
-            "blueprint_count":      "SELECT COUNT(*) FROM skill_blueprints WHERE space_id = CAST(:sid AS uuid)",
+            "member_count":         text("SELECT COUNT(*) FROM space_members WHERE space_id = CAST(:sid AS uuid)"),
+            "entity_count":         text("SELECT COUNT(*) FROM knowledge_entities WHERE space_id = CAST(:sid AS uuid)"),
+            "document_count":       text("SELECT COUNT(*) FROM documents WHERE space_id = CAST(:sid AS uuid)"),
+            "discussion_posts":     text("SELECT COUNT(*) FROM course_posts WHERE space_id = CAST(:sid AS uuid)"),
+            "blueprint_count":      text("SELECT COUNT(*) FROM skill_blueprints WHERE space_id = CAST(:sid AS uuid)"),
             "chapter_count":        text("""
                 SELECT COUNT(*) FROM skill_chapters sc
                 JOIN skill_blueprints sb ON sb.blueprint_id = sc.blueprint_id
                 WHERE sb.space_id = CAST(:sid AS uuid)
             """),
-            "fork_count":           "SELECT COUNT(*) FROM knowledge_spaces WHERE fork_from_space_id = CAST(:sid AS uuid)",
-            "subscription_count":   "SELECT COUNT(*) FROM space_subscriptions WHERE space_id = CAST(:sid AS uuid)",
+            "fork_count":           text("SELECT COUNT(*) FROM knowledge_spaces WHERE fork_from_space_id = CAST(:sid AS uuid)"),
+            "subscription_count":   text("SELECT COUNT(*) FROM space_subscriptions WHERE space_id = CAST(:sid AS uuid)"),
         }
         for key, q in queries.items():
-            result = await self.db.execute(q if isinstance(q, str) else q, {"sid": sid})
+            result = await self.db.execute(q, {"sid": sid})
             stats[key] = int(result.fetchone()[0] or 0)
         return stats
 

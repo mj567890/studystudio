@@ -14,7 +14,31 @@
     <div v-if="loading" style="text-align:center;padding:20px">
       <el-icon class="is-loading"><Loading /></el-icon>
     </div>
-    <el-empty v-else-if="posts.length === 0" description="还没有帖子，来发第一帖吧" :image-size="60" />
+    <!-- 源课程讨论引用（只读） -->
+    <div v-if="sourcePosts.length > 0" class="source-posts-section">
+      <div class="source-header">
+        <span class="source-label">📖 来自源课程「{{ sourceSpaceName }}」的讨论</span>
+        <span class="source-hint">只读引用</span>
+      </div>
+      <div class="post-list">
+        <div v-for="post in sourcePosts" :key="'src-'+post.post_id" class="post-card source-post-card" @click="openPost(post)">
+          <div class="post-header">
+            <span :class="['post-type-tag', post.post_type]">
+              {{ postTypeLabel(post.post_type) }}
+            </span>
+            <span class="source-badge">源课程</span>
+            <span class="post-author">{{ post.username }}</span>
+            <span class="post-time">{{ formatDate(post.created_at) }}</span>
+          </div>
+          <div class="post-content">{{ post.content }}</div>
+          <div class="post-footer">
+            <span class="post-stat">💬 {{ post.reply_count }} 条回复</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <el-empty v-else-if="posts.length === 0 && sourcePosts.length === 0" description="还没有帖子，来发第一帖吧" :image-size="60" />
     <div v-else class="post-list">
       <div v-for="post in posts" :key="post.post_id" class="post-card">
         <div class="post-header">
@@ -82,7 +106,10 @@
             <div class="reply-content">{{ r.content }}</div>
           </div>
         </div>
-        <div class="reply-input">
+        <div v-if="currentPost.is_source" class="source-readonly-hint">
+          💡 此为源课程讨论，仅供查阅。如需讨论，请在当前课程发帖。
+        </div>
+        <div v-else class="reply-input">
           <el-input v-model="replyContent" placeholder="写下你的回复…" type="textarea" :rows="3" />
           <el-button type="primary" size="small" :loading="replying"
             style="margin-top:8px;width:100%" @click="submitReply">回复</el-button>
@@ -101,6 +128,8 @@ import { discussApi } from '@/api'
 const props = defineProps<{ chapterId: string; topicKey: string; spaceId?: string }>()
 
 const posts   = ref<any[]>([])
+const sourcePosts = ref<any[]>([])
+const sourceSpaceName = ref('')
 const loading = ref(false)
 const showPost = ref(false)
 const posting  = ref(false)
@@ -146,6 +175,18 @@ async function loadPosts() {
   finally { loading.value = false }
 }
 
+async function loadSourcePosts() {
+  if (!props.spaceId || !props.chapterId) return
+  try {
+    const res: any = await discussApi.listSourcePosts(props.spaceId, {
+      chapter_id: props.chapterId,
+      limit: 10
+    })
+    sourcePosts.value = res.data?.posts || []
+    sourceSpaceName.value = res.data?.source_space_name || ''
+  } catch { sourcePosts.value = [] }
+}
+
 async function submitPost() {
   if (!newPost.value.content.trim()) { ElMessage.warning('请填写内容'); return }
   posting.value = true
@@ -186,8 +227,8 @@ async function submitReply() {
 }
 
 
-watch(() => props.chapterId, loadPosts)
-onMounted(loadPosts)
+watch(() => props.chapterId, () => { loadPosts(); loadSourcePosts() })
+onMounted(() => { loadPosts(); loadSourcePosts() })
 </script>
 
 <style scoped>
@@ -243,4 +284,29 @@ onMounted(loadPosts)
 .reply-author { font-size: 12px; color: #606266; font-weight: 500; }
 .reply-time   { font-size: 12px; color: #c0c4cc; margin-left: auto; }
 .reply-content { font-size: 13px; color: #303133; line-height: 1.7; }
+
+/* ── 源课程讨论引用 ── */
+.source-posts-section {
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px dashed #e4e7ed;
+}
+.source-header {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 10px; padding: 8px 12px;
+  background: linear-gradient(135deg, #f5f7fa, #e8ecf1);
+  border-radius: 8px; border-left: 3px solid #909399;
+}
+.source-label { font-size: 13px; font-weight: 600; color: #606266; }
+.source-hint { font-size: 11px; color: #909399; background: #fff; padding: 2px 8px; border-radius: 10px; border: 1px solid #e4e7ed; }
+.source-post-card { background: #fff; border-color: #e4e7ed; }
+.source-post-card:hover { border-color: #c0c4cc; }
+.source-badge {
+  font-size: 10px; padding: 1px 6px; border-radius: 4px;
+  color: #909399; background: #f0f0f0; font-weight: 500;
+}
+.source-readonly-hint {
+  text-align: center; padding: 14px; color: #909399; font-size: 13px;
+  background: #fafafa; border-radius: 8px; border: 1px dashed #e4e7ed;
+}
 </style>

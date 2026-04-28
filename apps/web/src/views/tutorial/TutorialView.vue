@@ -399,7 +399,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, reactive } from 'vue'
+import { ref, computed, watch, onMounted, reactive, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
@@ -550,10 +550,12 @@ async function loadTutorial() {
             progress.value = pr.data?.progress || {}
           } catch (_) {}
         }
-        // persist_last_chapter: 优先导航跳转（last_chapter_id），降级刷新恢复
+        // chapter 深链接优先级最高（管理员预览 etc.）
+        const chapterFromQuery = route.query.chapter as string
         const lastId = localStorage.getItem('last_chapter_id')
         const savedId = localStorage.getItem(`last_chapter:${topicKey.value}`)
-        const target = lastId ? list.find((c: any) => c.chapter_id === lastId)
+        const target = chapterFromQuery ? list.find((c: any) => c.chapter_id === chapterFromQuery)
+          : lastId ? list.find((c: any) => c.chapter_id === lastId)
           : savedId ? list.find((c: any) => c.chapter_id === savedId) : null
         selectChapter(target || list[0])
         if (lastId) localStorage.removeItem('last_chapter_id')
@@ -568,6 +570,13 @@ async function selectChapter(ch: any) {
   chapterEnterTime.value = Date.now()
   errorPatterns.value = []
   currentChapter.value = ch
+  // scroll active chapter into view (admin preview deep-link etc.)
+  if (ch?.chapter_id) {
+    nextTick(() => {
+      const el = document.querySelector('.chapter-item.active')
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    })
+  }
   // persist_last_chapter: 刷新页面时留在当前章节
   if (topicKey.value && ch?.chapter_id) {
     localStorage.setItem(`last_chapter:${topicKey.value}`, ch.chapter_id)

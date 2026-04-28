@@ -115,8 +115,10 @@
                       <el-tag size="small" :type="row.has_content ? 'success' : 'danger'" round>{{ row.has_content ? '有' : '无' }}</el-tag>
                     </template>
                   </el-table-column>
-                  <el-table-column label="操作" width="90" align="center">
+                  <el-table-column label="操作" width="155" align="center">
                     <template #default="{ row }">
+                      <el-button size="small" text type="success"
+                        @click="previewChapter(row)">预览</el-button>
                       <el-button size="small" text type="primary"
                         :loading="regeneratingId === row.chapter_id"
                         @click="regenChapter(row)">重生成</el-button>
@@ -131,7 +133,8 @@
 
       <!-- ── Tab 3：文档管理 ── -->
       <el-tab-pane label="文档管理" @click.once="loadAllDocs">
-        <div style="margin-bottom:12px;display:flex;justify-content:flex-end">
+        <div style="margin-bottom:12px;display:flex;justify-content:flex-end;gap:8px">
+          <el-button size="small" type="success" :loading="backfilling" @click="backfillPageNo">补全页码</el-button>
           <el-button size="small" @click="loadAllDocs">刷新</el-button>
         </div>
         <el-table :data="allDocs" size="small" v-loading="docsLoading">
@@ -200,6 +203,7 @@ const courseStages      = ref<any[]>([])
 const courseDrawerLoading = ref(false)
 const openStages        = ref<string[]>([])
 const regeneratingId    = ref<string | null>(null)
+const previewTopicKey   = ref('')
 const totalChapters     = computed(() => courseStages.value.reduce((s: number, st: any) => s + st.chapters.length, 0))
 const totalWithContent  = computed(() => courseStages.value.reduce((s: number, st: any) => s + st.chapters.filter((c: any) => c.has_content).length, 0))
 
@@ -217,12 +221,20 @@ async function openCourseDrawer(course: any) {
   courseDrawerVisible.value = true
   courseDrawerLoading.value = true
   courseStages.value = []
+  previewTopicKey.value = ''
   try {
     const { data } = await _http.get(`/admin/courses/${course.blueprint_id}/chapters`)
     courseStages.value = data.data?.stages || []
+    previewTopicKey.value = data.data?.topic_key || ''
     openStages.value = courseStages.value.map((s: any) => s.stage_id)
   } catch { ElMessage.error('加载章节失败') }
   finally { courseDrawerLoading.value = false }
+}
+
+function previewChapter(chapter: any) {
+  const params = new URLSearchParams({ topic: previewTopicKey.value })
+  if (chapter.chapter_id) params.set('chapter', chapter.chapter_id)
+  router.push({ path: '/tutorial', query: Object.fromEntries(params) })
 }
 
 async function regenChapter(chapter: any) {
@@ -255,6 +267,24 @@ async function regenAll(course: any) {
 const allDocs      = ref<any[]>([])
 const docsLoading  = ref(false)
 const reparsingId  = ref<string | null>(null)
+const backfilling   = ref(false)
+
+async function backfillPageNo() {
+  backfilling.value = true
+  try {
+    const res: any = await adminApi.backfillPageNo()
+    if (res.code === 200) {
+      const d = res.data
+      let msg = `已补全 ${d.non_pdf_fixed} 个非 PDF 文档的页码`
+      if (d.pdf_pending > 0) msg += `，${d.pdf_pending} 个 PDF 需手动重解析`
+      ElMessage.success(msg)
+      await loadAllDocs()
+    } else {
+      ElMessage.error(res.msg || '操作失败')
+    }
+  } catch { ElMessage.error('操作失败') }
+  finally { backfilling.value = false }
+}
 
 async function loadAllDocs() {
   docsLoading.value = true
