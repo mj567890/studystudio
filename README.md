@@ -8,7 +8,7 @@
 
 <br/>
 
-![Version](https://img.shields.io/badge/Version-2.7.0-blue?style=flat-square)
+![Version](https://img.shields.io/badge/Version-2.8.0-blue?style=flat-square)
 ![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=flat-square&logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.110-009688?style=flat-square&logo=fastapi&logoColor=white)
 ![Vue](https://img.shields.io/badge/Vue-3.4-4FC08D?style=flat-square&logo=vue.js&logoColor=white)
