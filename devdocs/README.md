@@ -36,7 +36,7 @@ devdocs/
 
 ## 当前状态速览（2026-04-29）
 
-- **主要文档**：`handover/HANDOVER.md`（v21.0）、`handover/SYSTEM_REFERENCE.md`（v3.0）
+- **主要文档**：`handover/HANDOVER.md`（v21.1）、`handover/SYSTEM_REFERENCE.md`（v3.0）
 - **部署系统**：新装 + 升级完整方案，详见 `architecture/deployment_system.md`
 - **安全审计**：全栈审计完成（4 CRITICAL + 10 HIGH 已修复），详见 `security/SECURITY_AUDIT_REPORT_20260427.md`
 - **当前版本**：`VERSION` = `2.7.0`
