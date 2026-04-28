@@ -34,19 +34,21 @@ devdocs/
 
 ---
 
-## 当前状态速览（2026-04-28）
+## 当前状态速览（2026-04-29）
 
-- **主要文档**：`handover/HANDOVER.md`（v20.0）、`handover/SYSTEM_REFERENCE.md`（v3.0）
+- **主要文档**：`handover/HANDOVER.md`（v21.0）、`handover/SYSTEM_REFERENCE.md`（v3.0）
 - **部署系统**：新装 + 升级完整方案，详见 `architecture/deployment_system.md`
 - **安全审计**：全栈审计完成（4 CRITICAL + 10 HIGH 已修复），详见 `security/SECURITY_AUDIT_REPORT_20260427.md`
 - **当前版本**：`VERSION` = `2.7.0`
+- **教师引导式课程迭代**：三层方案全部实现 — 生成前约束 + 对话式章节精调 + 测验/讨论联动再生
 - **删除功能**：全链路实现 + 6 Bug 修复 + 迁移补齐（022-026）+ 生产验收
 - **Phase 5 讨论引用**：Fork 空间章节页只读引用源课程讨论（递归 CTE + WallSection）
 - **章节预览深链接**：管理面板 → 教程页自动定位
 - **page_no 补全**：一键补全端点（非 PDF 直接 UPDATE，PDF 返回待处理列表）
 - **前端优化**：chunk 拆分（element-plus + vue-vendor 独立缓存），主入口 1,222KB→56KB
 - **管线优化**：Phase 0~9 全完成，详见 `PROJECT_LOG_V2_管线优化记录.md`
-- **全部计划任务已完成**
+- **数据库迁移**：27 个（最新：027_teacher_refinement）
+- **全量测试**：144 passed, 0 failed
 
 ---
 
@@ -118,5 +120,5 @@ devdocs/
 
 ---
 
-*README 版本：v2.3*
-*更新时间：2026-04-28*
+*README 版本：v2.4*
+*更新时间：2026-04-29*

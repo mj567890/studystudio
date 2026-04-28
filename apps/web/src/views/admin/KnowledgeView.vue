@@ -115,10 +115,13 @@
                       <el-tag size="small" :type="row.has_content ? 'success' : 'danger'" round>{{ row.has_content ? '有' : '无' }}</el-tag>
                     </template>
                   </el-table-column>
-                  <el-table-column label="操作" width="155" align="center">
+                  <el-table-column label="操作" width="230" align="center">
                     <template #default="{ row }">
                       <el-button size="small" text type="success"
                         @click="previewChapter(row)">预览</el-button>
+                      <el-button size="small" text type="warning"
+                        :loading="refiningId === row.chapter_id"
+                        @click="refineChapter(row)">精调</el-button>
                       <el-button size="small" text type="primary"
                         :loading="regeneratingId === row.chapter_id"
                         @click="regenChapter(row)">重生成</el-button>
@@ -203,6 +206,7 @@ const courseStages      = ref<any[]>([])
 const courseDrawerLoading = ref(false)
 const openStages        = ref<string[]>([])
 const regeneratingId    = ref<string | null>(null)
+const refiningId        = ref<string | null>(null)
 const previewTopicKey   = ref('')
 const totalChapters     = computed(() => courseStages.value.reduce((s: number, st: any) => s + st.chapters.length, 0))
 const totalWithContent  = computed(() => courseStages.value.reduce((s: number, st: any) => s + st.chapters.filter((c: any) => c.has_content).length, 0))
@@ -249,6 +253,25 @@ async function regenChapter(chapter: any) {
   } catch (err: any) {
     ElMessage.error('失败：' + (err?.response?.data?.msg || err?.message || '未知'))
   } finally { regeneratingId.value = null }
+}
+
+async function refineChapter(chapter: any) {
+  const result = await (ElMessageBox as any).prompt(
+    '输入修改指令，AI 将按你的要求重写本章。\n\n例如："增加实操案例，弱化理论推导"、"加入航空维修安全规范"、"难度下调，适配中职基础"',
+    `精调章节：${chapter.title}`,
+    { inputType: 'textarea', inputRows: 4, confirmButtonText: '执行精调', cancelButtonText: '取消' }
+  ).catch(() => null)
+  if (!result?.value?.trim()) return
+  refiningId.value = chapter.chapter_id
+  try {
+    await _http.post(`/admin/courses/chapters/${chapter.chapter_id}/refine`, {
+      instruction: result.value.trim()
+    }, { timeout: 180000 })
+    ElMessage.success('章节已按你的指令更新')
+    if (currentCourse.value) openCourseDrawer(currentCourse.value)
+  } catch (err: any) {
+    ElMessage.error('精调失败：' + (err?.response?.data?.msg || err?.message || '未知'))
+  } finally { refiningId.value = null }
 }
 
 async function regenAll(course: any) {

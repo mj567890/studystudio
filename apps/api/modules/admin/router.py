@@ -9,6 +9,7 @@ FE-A04: 系统初始化（种子库+题库+系统配置）
 FE-A05: 章节进度（标记完成+查询进度）
 """
 import asyncio
+import json
 import uuid
 from datetime import datetime, timezone
 
@@ -1241,6 +1242,151 @@ async def regenerate_all_course_chapters(
     from apps.api.tasks.blueprint_tasks import regenerate_all_chapters
     regenerate_all_chapters.apply_async(args=[blueprint_id], queue="knowledge")
     return {"code": 200, "data": {"queued": True, "message": "已提交后台处理，请稍后刷新查看进度"}}
+
+
+# ══════════════════════════════════════════
+# Layer 2: 教师对话式章节精调
+# ══════════════════════════════════════════
+
+class RefineChapterRequest(BaseModel):
+    instruction: str
+    auto_regenerate_quiz: bool = True
+    auto_regenerate_discussion: bool = False
+
+
+@router.post("/admin/courses/chapters/{chapter_id}/refine")
+async def refine_chapter(
+    chapter_id: str,
+    req: RefineChapterRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_role("admin")),
+) -> dict:
+    """教师通过自然语言指令精调章节内容（同步执行，约 30-150s）。"""
+    from sqlalchemy.exc import ProgrammingError
+    from apps.api.modules.skill_blueprint.repository import BlueprintRepository
+    from apps.api.tasks.blueprint_tasks import (
+        CHAPTER_REFINEMENT_PROMPT, TEACHER_INSTRUCTION_PREFIX,
+        _normalize_chapter_content,
+    )
+    from apps.api.core.llm_gateway import get_llm_gateway
+    import apps.api.core.llm_gateway as _gw_mod
+
+    if not req.instruction.strip():
+        raise HTTPException(400, detail={"msg": "精调指令不能为空"})
+
+    # 1. 读取章节完整信息
+    try:
+        row = (await db.execute(
+            text("""
+                SELECT sc.title, sc.objective, sc.task_description,
+                       sc.content_text, sc.blueprint_id::text,
+                       sb.teacher_instruction
+                FROM skill_chapters sc
+                JOIN skill_blueprints sb ON sb.blueprint_id = sc.blueprint_id
+                WHERE sc.chapter_id = CAST(:cid AS uuid)
+            """),
+            {"cid": chapter_id}
+        )).fetchone()
+    except ProgrammingError:
+        raise HTTPException(400, detail={"msg": "该功能暂不可用，系统正在升级中"})
+    if not row:
+        return {"code": 404, "msg": "章节不存在", "data": {}}
+
+    # 2. 提取当前内容摘要（取前 500 字，避免 prompt 过长）
+    content_json = row.content_text or "{}"
+    try:
+        content_data = json.loads(content_json) if isinstance(content_json, str) else content_json
+        current_summary = (content_data.get("full_content", "") or "")[:500]
+    except (json.JSONDecodeError, TypeError):
+        current_summary = str(content_json)[:500]
+
+    # 3. 构建全局约束块
+    global_block = TEACHER_INSTRUCTION_PREFIX.format(
+        instruction=row.teacher_instruction or "无特殊要求"
+    ) if row.teacher_instruction else ""
+
+    # 4. 调用 LLM 精调
+    _gw_mod._llm_gateway = None
+    llm = get_llm_gateway()
+    prompt = CHAPTER_REFINEMENT_PROMPT.format(
+        chapter_title=row.title or "",
+        objective=row.objective or "",
+        task_description=row.task_description or "",
+        current_content_summary=current_summary,
+        teacher_instruction=req.instruction.strip(),
+        global_instruction=global_block,
+    )
+    try:
+        content = await asyncio.wait_for(
+            llm.generate(prompt, model_route="tutorial_content"),
+            timeout=150
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(504, detail={"msg": "精调超时，请重试或缩短指令"})
+
+    # 5. 更新章节内容
+    repo = BlueprintRepository(db)
+    await repo.update_chapter_content(chapter_id, _normalize_chapter_content(content.strip()))
+    await db.execute(
+        text("""UPDATE skill_chapters SET refined_at=now(),
+               refinement_version = COALESCE(refinement_version, 0) + 1,
+               updated_at=now()
+               WHERE chapter_id=CAST(:cid AS uuid)"""),
+        {"cid": chapter_id}
+    )
+    await db.commit()
+
+    # 6. Layer 3: 测验缓存失效
+    quiz_invalidated = False
+    quiz_queued = False
+    if req.auto_regenerate_quiz:
+        try:
+            await db.execute(
+                text("""UPDATE chapter_quizzes SET generated_at = NULL
+                       WHERE chapter_id = CAST(:cid AS uuid)"""),
+                {"cid": chapter_id}
+            )
+            await db.commit()
+            quiz_invalidated = True
+            # 异步派发重新生成
+            from apps.api.tasks.blueprint_tasks import regenerate_chapter_quiz
+            regenerate_chapter_quiz.apply_async(args=[chapter_id], queue="knowledge", countdown=5)
+            quiz_queued = True
+        except Exception:
+            pass  # 测验失效失败不阻断精调
+
+    # 7. Layer 3: 讨论种子生成（可选）
+    discussion_queued = False
+    if req.auto_regenerate_discussion:
+        try:
+            # 获取章节所属 space_id 和当前用户
+            bp_row = (await db.execute(
+                text("SELECT sb.space_id::text FROM skill_blueprints sb "
+                     "JOIN skill_chapters sc ON sc.blueprint_id = sb.blueprint_id "
+                     "WHERE sc.chapter_id = CAST(:cid AS uuid)"),
+                {"cid": chapter_id}
+            )).fetchone()
+            space_id = bp_row[0] if bp_row else None
+            if space_id:
+                from apps.api.tasks.blueprint_tasks import generate_discussion_seeds
+                generate_discussion_seeds.apply_async(
+                    args=[chapter_id, space_id, current_user.get("user_id", "")],
+                    queue="knowledge", countdown=10
+                )
+                discussion_queued = True
+        except Exception:
+            pass
+
+    return {
+        "code": 200,
+        "data": {
+            "chapter_id": chapter_id,
+            "content_regenerated": True,
+            "quiz_invalidated": quiz_invalidated,
+            "quiz_regeneration_queued": quiz_queued,
+            "discussion_queued": discussion_queued,
+        }
+    }
 
 
 @router.post("/files/reparse/{document_id}")

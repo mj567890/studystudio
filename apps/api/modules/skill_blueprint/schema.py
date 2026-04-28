@@ -49,5 +49,6 @@ class BlueprintStatusOut(BaseModel):
     message:      str
 
 class GenerateBlueprintRequest(BaseModel):
-    space_id:    Optional[str] = None
-    force_regen: bool = False
+    space_id:            Optional[str] = None
+    force_regen:         bool = False
+    teacher_instruction: Optional[str] = None

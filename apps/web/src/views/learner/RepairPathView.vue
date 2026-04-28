@@ -19,6 +19,21 @@
         </div>
       </template>
 
+      <!-- Layer 1: 教学指导输入 -->
+      <div style="margin-bottom:16px">
+        <el-input
+          v-model="teacherInstruction"
+          type="textarea"
+          :rows="2"
+          size="small"
+          clearable
+          placeholder="教学指导（可选）：例如，侧重实操案例、减少理论推导、适配中职学生基础"
+          style="font-size:12px" />
+        <div style="font-size:11px;color:#909399;margin-top:2px">
+          AI 将按照你的教学要求生成课程内容。留空则使用默认风格
+        </div>
+      </div>
+
       <!-- 生成中 -->
       <div v-if="generating" style="padding:40px 24px">
         <div style="text-align:center;margin-bottom:20px">
@@ -93,6 +108,7 @@ const pathLoading  = ref(false)
 const domainsLoading = ref(false)
 const generating   = ref(false)
 const generatingMsg = ref('正在生成蓝图…')
+const teacherInstruction = ref('')
 const path         = ref<any>(null)
 const domains      = ref<any[]>([])
 let pollTimer: any = null
@@ -161,7 +177,7 @@ async function generate() {
   generating.value = true
   path.value = null
   try {
-    await blueprintApi.generate(topicKey.value, !!path.value)
+    await blueprintApi.generate(topicKey.value, !!path.value, teacherInstruction.value || undefined)
     startPolling()
   } catch {
     generating.value = false

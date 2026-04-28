@@ -56,7 +56,9 @@ async def trigger_generate(topic_key: str,
     space_id = req.space_id or await repo.resolve_space_id(topic_key)
     try:
         from apps.api.tasks.blueprint_tasks import synthesize_blueprint
-        task = synthesize_blueprint.apply_async(args=[topic_key, space_id], queue="knowledge")
+        task = synthesize_blueprint.apply_async(
+            args=[topic_key, space_id, req.teacher_instruction], queue="knowledge"
+        )
         logger.info("Blueprint generation triggered", topic_key=topic_key, task_id=task.id)
     except Exception as e:
         logger.error("Failed to trigger", error=str(e))

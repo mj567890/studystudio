@@ -85,8 +85,11 @@ export const authApi = {
 export const blueprintApi = {
   getStatus: (topic: string) =>
     http.get(`/blueprints/${topic}/status`),
-  generate: (topic: string, force = false) =>
-    http.post(`/blueprints/${topic}/generate`, { force_regen: force }),
+  generate: (topic: string, force = false, teacherInstruction?: string) =>
+    http.post(`/blueprints/${topic}/generate`, {
+      force_regen: force,
+      teacher_instruction: teacherInstruction || undefined,
+    }),
 }
 
 export const learnerApi = {
@@ -210,6 +213,8 @@ export const adminApi = {
   getAllDocuments: (params?: { status?: string; space_type?: string; page?: number; page_size?: number; sort_by?: string; sort_order?: string }) =>
     http.get('/files/all-documents', { params }),
   reparseDocument: (documentId: string) => http.post(`/files/reparse/${documentId}`),
+  refineChapter: (chapterId: string, data: { instruction: string; auto_regenerate_quiz?: boolean; auto_regenerate_discussion?: boolean }) =>
+    http.post(`/admin/courses/chapters/${chapterId}/refine`, data),
   backfillPageNo:   ()    => http.post('/admin/documents/backfill-page-no'),
   getStats:         ()    => http.get('/admin/system/stats'),
 

@@ -184,6 +184,14 @@ class BlueprintRepository:
             {"s": status, "bid": blueprint_id}
         )
 
+    async def set_teacher_instruction(self, blueprint_id: str, instruction: str | None) -> None:
+        """Layer 1: 存储教师的课程生成约束指令"""
+        await self.db.execute(
+            text("UPDATE skill_blueprints SET teacher_instruction=:inst, updated_at=now() "
+                 "WHERE blueprint_id=CAST(:bid AS uuid)"),
+            {"inst": instruction, "bid": blueprint_id}
+        )
+
     async def resolve_space_id(self, topic_key: str) -> Optional[str]:
         # 优先从已有蓝图记录取 space_id（topic_key 在 blueprints 里唯一）
         row = await self.db.execute(
