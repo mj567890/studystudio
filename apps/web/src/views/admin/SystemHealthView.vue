@@ -1091,7 +1091,7 @@ async function fetchHealth() {
   loading.value = true
   try {
     const { data } = await http.get('/admin/health')
-    healthData.value = data.data
+    healthData.value = data ?? null
   } catch (err) {
     console.error('Health check failed:', err)
   } finally {
@@ -1142,7 +1142,7 @@ async function confirmPurgeAllTemp() {
 
   try {
     const { data } = await http.post('/admin/health/purge-all-temp')
-    ElMessage.success(data.data.message)
+    ElMessage.success(data?.message || '清理完成')
     fetchHealth()
   } catch (err) {
     ElMessage.error('操作失败: ' + ((err as any)?.response?.data?.data?.message || (err as any)?.message || '未知错误'))
@@ -1154,7 +1154,7 @@ async function fetchPipelineStatus() {
   pipelineLoading.value = true
   try {
     const { data } = await http.get('/admin/health/pipeline-status')
-    pipelineData.value = data.data
+    pipelineData.value = data ?? null
   } catch (err) {
     console.error('Pipeline status fetch failed:', err)
   } finally {
@@ -1166,7 +1166,7 @@ async function fetchLlmStatus() {
   llmLoading.value = true
   try {
     const { data } = await http.get('/admin/health/llm-status')
-    llmStatus.value = data.data
+    llmStatus.value = data ?? null
   } catch (err) {
     console.error('LLM status fetch failed:', err)
   } finally {
@@ -1200,7 +1200,7 @@ async function retryDocument(docId: string, action: string) {
       document_id: docId,
       action,
     })
-    ElMessage.success(data.data.message)
+    ElMessage.success(data?.message || '操作已提交')
     fetchPipelineStatus()
   } catch (err) {
     ElMessage.error('操作失败: ' + ((err as any)?.response?.data?.data?.message || (err as any)?.message || '未知错误'))
@@ -1218,7 +1218,7 @@ async function retryAllFailed() {
 
   try {
     const { data } = await http.post('/admin/health/retry-all-failed')
-    ElMessage.success(data.data.message)
+    ElMessage.success(data?.message || '操作已提交')
     fetchPipelineStatus()
   } catch (err) {
     ElMessage.error('操作失败: ' + ((err as any)?.response?.data?.data?.message || (err as any)?.message || '未知错误'))
@@ -1236,7 +1236,7 @@ async function triggerRecovery() {
 
   try {
     const { data } = await http.post('/admin/health/trigger-recovery')
-    ElMessage.success(data.data.message)
+    ElMessage.success(data?.message || '恢复任务已触发')
   } catch (err) {
     ElMessage.error('触发失败: ' + ((err as any)?.response?.data?.data?.message || (err as any)?.message || '未知错误'))
   }
@@ -1253,7 +1253,7 @@ async function resetStuckBlueprint(bpId: string) {
 
   try {
     const { data } = await http.post('/admin/health/reset-stuck-blueprint', { blueprint_id: bpId })
-    ElMessage.success(data.data.message)
+    ElMessage.success(data?.message || '蓝图已重置')
     fetchPipelineStatus()
   } catch (err) {
     ElMessage.error('操作失败: ' + ((err as any)?.response?.data?.data?.message || (err as any)?.message || '未知错误'))
@@ -1266,7 +1266,7 @@ const bpSpaces = ref([] as any[])
 async function loadBpProgress() {
   try {
     const res = await http.get('/admin/health/blueprint-progress')
-    bpSpaces.value = res.data?.data?.spaces || []
+    bpSpaces.value = res.data?.spaces || []
   } catch {}
 }
 
@@ -1322,9 +1322,11 @@ async function loadDocuments(page?: number) {
     if (docFilter.value.space_type) params.space_type = docFilter.value.space_type
 
     const { data } = await http.get('/files/all-documents', { params })
-    documents.value = data.data.documents || []
-    docTotal.value = data.data.total || 0
-    docTotalPages.value = data.data.total_pages || 1
+    if (data) {
+      documents.value = data.documents || []
+      docTotal.value = data.total || 0
+      docTotalPages.value = data.total_pages || 1
+    }
   } catch (err) {
     console.error('Load documents failed:', err)
   } finally {
@@ -1347,7 +1349,7 @@ async function retryDocumentAction(row: any) {
       document_id: row.document_id,
       action,
     })
-    ElMessage.success(data.data?.message || '已触发重试')
+    ElMessage.success(data?.message || '已触发重试')
     loadDocuments()
   } catch (err) {
     ElMessage.error('操作失败: ' + ((err as any)?.response?.data?.data?.message || (err as any)?.message || '未知错误'))
@@ -1365,7 +1367,7 @@ async function reparseDocumentAction(row: any) {
 
   try {
     const { data } = await http.post(`/files/reparse/${row.document_id}`)
-    ElMessage.success(data.data?.message || data.msg || '已触发重新解析')
+    ElMessage.success(data?.message || data?.msg || '已触发重新解析')
     loadDocuments()
   } catch (err) {
     ElMessage.error('操作失败: ' + ((err as any)?.response?.data?.data?.message || (err as any)?.message || '未知错误'))
