@@ -28,6 +28,9 @@
         <el-menu-item index="/notes">
           <el-icon><Notebook /></el-icon>我的笔记
         </el-menu-item>
+        <el-menu-item index="/templates">
+          <el-icon><Document /></el-icon>课程模板
+        </el-menu-item>
         <el-divider style="margin:8px 0;border-color:#2d3f50" />
         <div style="padding:4px 20px 2px;font-size:11px;color:#5a7a9a;letter-spacing:1px">社区</div>
         <el-menu-item index="/discuss">
@@ -84,6 +87,7 @@ const titleMap: Record<string, string> = {
   '/community': '发现课程',
   '/discuss':   '讨论',
   '/notes':     '我的笔记',
+  '/templates': '课程模板',
   '/admin':     '管理后台',
 }
 const pageTitle = computed(() => titleMap[route.path] || 'StudyStudio')

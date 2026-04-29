@@ -43,6 +43,7 @@ const router = createRouter({
         { path: 'chat',     component: () => import('@/views/tutorial/ChatView.vue') },
         { path: 'upload',   component: () => import('@/views/learner/UploadView.vue') },
         { path: 'notes',    component: () => import('@/views/learner/NotesView.vue') },
+        { path: 'templates', component: () => import('@/views/learner/TemplateManageView.vue') },
         { path: 'spaces',              component: () => import('@/views/learner/SpacesView.vue') },
         { path: 'spaces/trash',          component: () => import('@/views/learner/TrashView.vue') },
         { path: 'spaces/:space_id',    component: () => import('@/views/learner/SpaceDetailView.vue') },

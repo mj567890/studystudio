@@ -44,6 +44,28 @@ async def _safe_count(db: AsyncSession, sql: str, params: dict | None = None) ->
         return 0
 
 
+async def _get_space_id_from_chapter(db: AsyncSession, chapter_id: str) -> str | None:
+    """从 chapter_id 反查 space_id。"""
+    row = await db.execute(
+        text("""SELECT sb.space_id::text FROM skill_chapters sc
+                JOIN skill_blueprints sb ON sb.blueprint_id = sc.blueprint_id
+                WHERE sc.chapter_id = CAST(:cid AS uuid)"""),
+        {"cid": chapter_id}
+    )
+    r = row.fetchone()
+    return r[0] if r else None
+
+
+async def _get_space_id_from_blueprint(db: AsyncSession, blueprint_id: str) -> str | None:
+    """从 blueprint_id 反查 space_id。"""
+    row = await db.execute(
+        text("SELECT space_id::text FROM skill_blueprints WHERE blueprint_id = CAST(:bid AS uuid)"),
+        {"bid": blueprint_id}
+    )
+    r = row.fetchone()
+    return r[0] if r else None
+
+
 
 # ════════════════════════════════════════════════════════════════
 # FE-A01：领域查询 + 文档列表
@@ -145,7 +167,7 @@ class CreateKnowledgeSpaceRequest(BaseModel):
 async def create_knowledge_space(
     req: CreateKnowledgeSpaceRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(require_role("admin", "knowledge_reviewer")),
+    current_user: dict = Depends(get_current_user),
 ) -> dict:
     """创建知识空间（领域）；已存在时直接返回原 space_id。委托给 SpaceService 统一创建。"""
     from apps.api.modules.space.service import SpaceService, SpaceError
@@ -1095,39 +1117,46 @@ async def list_spaces_with_review_stats(
 @router.get("/admin/courses")
 async def list_courses(
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(require_role("admin")),
+    current_user: dict = Depends(get_current_user),
 ) -> dict:
-    """获取所有有 blueprint 的课程列表。"""
+    """获取用户有权管理的课程列表（空间所有者）。管理员可查看全部。"""
     from sqlalchemy.exc import ProgrammingError
+    user_roles = set(current_user.get("roles", []))
+    is_admin = bool(user_roles.intersection({"admin", "superadmin"}))
     try:
-        result = await db.execute(
-            text("""
-                SELECT
-                    ks.space_id::text,
-                    sb.blueprint_id::text,
-                    ks.name,
-                    ks.space_type,
-                    sb.status AS bp_status,
-                    sb.updated_at AS bp_updated_at,
-                    (SELECT COUNT(*) FROM skill_chapters sc
-                     JOIN skill_stages ss ON ss.stage_id = sc.stage_id
-                     WHERE ss.blueprint_id = sb.blueprint_id) AS chapter_count,
-                    (SELECT COUNT(*) FROM skill_chapters sc
-                     JOIN skill_stages ss ON ss.stage_id = sc.stage_id
-                     WHERE ss.blueprint_id = sb.blueprint_id
-                       AND sc.content_text IS NOT NULL
-                       AND sc.content_text != '') AS content_count
-                FROM knowledge_spaces ks
-                JOIN LATERAL (
-                    SELECT * FROM skill_blueprints
-                    WHERE space_id = ks.space_id
-                    ORDER BY updated_at DESC NULLS LAST
-                    LIMIT 1
-                ) sb ON true
-                WHERE ks.space_type IN ('global', 'personal')
-                ORDER BY ks.created_at DESC
-            """)
-        )
+        base_sql = """
+            SELECT
+                ks.space_id::text,
+                sb.blueprint_id::text,
+                ks.name,
+                ks.space_type,
+                sb.status AS bp_status,
+                sb.updated_at AS bp_updated_at,
+                (SELECT COUNT(*) FROM skill_chapters sc
+                 JOIN skill_stages ss ON ss.stage_id = sc.stage_id
+                 WHERE ss.blueprint_id = sb.blueprint_id) AS chapter_count,
+                (SELECT COUNT(*) FROM skill_chapters sc
+                 JOIN skill_stages ss ON ss.stage_id = sc.stage_id
+                 WHERE ss.blueprint_id = sb.blueprint_id
+                   AND sc.content_text IS NOT NULL
+                   AND sc.content_text != '') AS content_count
+            FROM knowledge_spaces ks
+            JOIN LATERAL (
+                SELECT * FROM skill_blueprints
+                WHERE space_id = ks.space_id
+                ORDER BY updated_at DESC NULLS LAST
+                LIMIT 1
+            ) sb ON true
+            WHERE ks.deleted_at IS NULL
+        """
+        if is_admin:
+            result = await db.execute(text(base_sql + " ORDER BY ks.created_at DESC"))
+        else:
+            result = await db.execute(
+                text(base_sql + """ AND (ks.owner_id = CAST(:uid AS uuid) OR ks.space_type = 'global')
+                    ORDER BY ks.created_at DESC"""),
+                {"uid": current_user["user_id"]}
+            )
         courses = []
         for r in result.fetchall():
             m = dict(r._mapping)
@@ -1150,9 +1179,17 @@ async def list_courses(
 async def list_course_chapters(
     blueprint_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(require_role("admin")),
+    current_user: dict = Depends(get_current_user),
 ) -> dict:
-    """获取课程下所有章节，按 stage 分组。返回 topic_key 供前端跳转。"""
+    """获取课程下所有章节，按 stage 分组。返回 topic_key 供前端跳转。需要空间所有者权限。"""
+    from apps.api.modules.space.service import SpaceService, SpaceError
+    space_id = await _get_space_id_from_blueprint(db, blueprint_id)
+    if not space_id:
+        raise HTTPException(404, detail={"msg": "课程不存在"})
+    try:
+        await SpaceService(db).require_space_owner(space_id, current_user["user_id"])
+    except SpaceError as e:
+        raise HTTPException(403, detail={"code": e.code, "msg": e.msg})
     from sqlalchemy.exc import ProgrammingError
     from apps.api.modules.skill_blueprint.repository import BlueprintRepository
     try:
@@ -1197,9 +1234,17 @@ async def list_course_chapters(
 async def regenerate_chapter(
     chapter_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(require_role("admin")),
+    current_user: dict = Depends(get_current_user),
 ) -> dict:
-    """单章内容重生成（同步执行，约 30-150s）。"""
+    """单章内容重生成（同步执行，约 30-150s）。需要空间所有者权限。"""
+    from apps.api.modules.space.service import SpaceService, SpaceError
+    space_id = await _get_space_id_from_chapter(db, chapter_id)
+    if not space_id:
+        raise HTTPException(404, detail={"msg": "章节不存在或已删除"})
+    try:
+        await SpaceService(db).require_space_owner(space_id, current_user["user_id"])
+    except SpaceError as e:
+        raise HTTPException(403, detail={"code": e.code, "msg": e.msg})
     from sqlalchemy.exc import ProgrammingError
     from apps.api.modules.skill_blueprint.repository import BlueprintRepository
     from apps.api.tasks.blueprint_tasks import CHAPTER_CONTENT_PROMPT, _normalize_chapter_content
@@ -1236,9 +1281,18 @@ async def regenerate_chapter(
 @router.post("/admin/courses/{blueprint_id}/regenerate-all")
 async def regenerate_all_course_chapters(
     blueprint_id: str,
-    current_user: dict = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
 ) -> dict:
-    """全量章节内容重生成（派发 Celery 后台任务）。"""
+    """全量章节内容重生成（派发 Celery 后台任务）。需要空间所有者权限。"""
+    from apps.api.modules.space.service import SpaceService, SpaceError
+    space_id = await _get_space_id_from_blueprint(db, blueprint_id)
+    if not space_id:
+        raise HTTPException(404, detail={"msg": "课程不存在或已删除"})
+    try:
+        await SpaceService(db).require_space_owner(space_id, current_user["user_id"])
+    except SpaceError as e:
+        raise HTTPException(403, detail={"code": e.code, "msg": e.msg})
     from apps.api.tasks.blueprint_tasks import regenerate_all_chapters
     regenerate_all_chapters.apply_async(args=[blueprint_id], queue="knowledge")
     return {"code": 200, "data": {"queued": True, "message": "已提交后台处理，请稍后刷新查看进度"}}
@@ -1259,9 +1313,17 @@ async def refine_chapter(
     chapter_id: str,
     req: RefineChapterRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(require_role("admin")),
+    current_user: dict = Depends(get_current_user),
 ) -> dict:
-    """教师通过自然语言指令精调章节内容（同步执行，约 30-150s）。"""
+    """教师通过自然语言指令精调章节内容（同步执行，约 30-150s）。需要空间所有者权限。"""
+    from apps.api.modules.space.service import SpaceService, SpaceError
+    space_id = await _get_space_id_from_chapter(db, chapter_id)
+    if not space_id:
+        raise HTTPException(404, detail={"msg": "章节不存在或已删除"})
+    try:
+        await SpaceService(db).require_space_owner(space_id, current_user["user_id"])
+    except SpaceError as e:
+        raise HTTPException(403, detail={"code": e.code, "msg": e.msg})
     from sqlalchemy.exc import ProgrammingError
     from apps.api.modules.skill_blueprint.repository import BlueprintRepository
     from apps.api.tasks.blueprint_tasks import (

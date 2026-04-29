@@ -57,7 +57,8 @@ async def trigger_generate(topic_key: str,
     try:
         from apps.api.tasks.blueprint_tasks import synthesize_blueprint
         task = synthesize_blueprint.apply_async(
-            args=[topic_key, space_id, req.teacher_instruction], queue="knowledge"
+            args=[topic_key, space_id, req.teacher_instruction, req.type_instructions],
+            queue="knowledge"
         )
         logger.info("Blueprint generation triggered", topic_key=topic_key, task_id=task.id)
     except Exception as e:

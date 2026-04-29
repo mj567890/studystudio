@@ -51,6 +51,37 @@
             />
           </div>
 
+          <div class="section-block">
+            <p class="field-label">课程模板 — 按课型分别指定</p>
+            <div style="margin-bottom:8px">
+              <span style="font-size:12px;color:#909399">原理课</span>
+              <TemplateSelector
+                v-model="selectedTheoryTemplateId"
+                placeholder="概念/原理类章节"
+                default-template-name="理论基础"
+                @select="onTheorySelect"
+              />
+            </div>
+            <div style="margin-bottom:8px">
+              <span style="font-size:12px;color:#909399">任务课</span>
+              <TemplateSelector
+                v-model="selectedTaskTemplateId"
+                placeholder="工具/操作类章节"
+                default-template-name="实操导向"
+                @select="onTaskSelect"
+              />
+            </div>
+            <div style="margin-bottom:8px">
+              <span style="font-size:12px;color:#909399">实战课</span>
+              <TemplateSelector
+                v-model="selectedProjectTemplateId"
+                placeholder="项目/综合类章节"
+                default-template-name="系统默认"
+                @select="onProjectSelect"
+              />
+            </div>
+            <p class="field-hint">AI 将根据每节课的性质自动选用对应模板。留空则使用默认风格</p>
+          </div>
 
           <el-button
             type="primary"
@@ -218,7 +249,8 @@ import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 // 安全审计 2026-04-27：DOMPurify 防止用户上传文件内容的 XSS
 import { ElMessage } from 'element-plus'
-import { fileApi, knowledgeApi } from '@/api'
+import { fileApi, knowledgeApi, templateApi } from '@/api'
+import TemplateSelector from '@/components/TemplateSelector.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useRouter } from 'vue-router'
 
@@ -245,6 +277,12 @@ const newDomainName = ref('')
 const spaceType = ref('personal')  // 创建即私人，可见性在空间详情页修改
 const uploadResult = ref<any>(null)
 const domains = ref<any[]>([])
+const selectedTheoryTemplateId = ref<string | null>(null)
+const selectedTaskTemplateId = ref<string | null>(null)
+const selectedProjectTemplateId = ref<string | null>(null)
+const theoryContent = ref('')
+const taskContent = ref('')
+const projectContent = ref('')
 const documents = ref<any[]>([])
 let timer: ReturnType<typeof setInterval>
 
@@ -345,6 +383,10 @@ function handleRemove(_file: any, files: any[]) {
   selectedFile.value = files.length ? files[files.length - 1].raw || null : null
 }
 
+function onTheorySelect(c: string)   { theoryContent.value = c }
+function onTaskSelect(c: string)    { taskContent.value = c }
+function onProjectSelect(c: string) { projectContent.value = c }
+
 async function upload() {
   const domain = effectiveDomain.value.trim()
   if (!selectedFile.value || !domain) {
@@ -372,6 +414,16 @@ async function upload() {
     selectedFile.value = null
     await loadDocs()
     await loadDomains()
+    // 设置空间三课型默认模板
+    const dom = domains.value.find((d: any) => d.domain_tag === domain)
+    if (dom?.space_id) {
+      templateApi.setSpaceDefault(
+        dom.space_id, null,
+        selectedTheoryTemplateId.value,
+        selectedTaskTemplateId.value,
+        selectedProjectTemplateId.value,
+      ).catch(() => {})
+    }
     scheduleNext()
   } finally {
     uploading.value = false

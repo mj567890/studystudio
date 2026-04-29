@@ -19,18 +19,48 @@
         </div>
       </template>
 
-      <!-- Layer 1: 教学指导输入 -->
+      <!-- Layer 1: 三课型模板选择 + 教学指导输入 -->
       <div style="margin-bottom:16px">
+        <div style="font-size:12px;color:#606266;margin-bottom:4px">课程模板 — 按课型分别指定</div>
+        <div style="display:flex;gap:8px;margin-bottom:8px">
+          <div style="flex:1">
+            <span style="font-size:11px;color:#909399">原理课</span>
+            <TemplateSelector
+              v-model="selectedTheoryTemplateId"
+              placeholder="概念/原理类"
+              default-template-name="理论基础"
+              @select="ct => theoryContent = ct"
+            />
+          </div>
+          <div style="flex:1">
+            <span style="font-size:11px;color:#909399">任务课</span>
+            <TemplateSelector
+              v-model="selectedTaskTemplateId"
+              placeholder="工具/操作类"
+              default-template-name="实操导向"
+              @select="ct => taskContent = ct"
+            />
+          </div>
+          <div style="flex:1">
+            <span style="font-size:11px;color:#909399">实战课</span>
+            <TemplateSelector
+              v-model="selectedProjectTemplateId"
+              placeholder="项目/综合类"
+              default-template-name="系统默认"
+              @select="ct => projectContent = ct"
+            />
+          </div>
+        </div>
         <el-input
           v-model="teacherInstruction"
           type="textarea"
           :rows="2"
           size="small"
           clearable
-          placeholder="教学指导（可选）：例如，侧重实操案例、减少理论推导、适配中职学生基础"
+          placeholder="额外教学指导（可选）：将追加到模板指令之后，可留空"
           style="font-size:12px" />
         <div style="font-size:11px;color:#909399;margin-top:2px">
-          AI 将按照你的教学要求生成课程内容。留空则使用默认风格
+          AI 将根据每节课的性质自动选用对应模板。留空则使用默认风格
         </div>
       </div>
 
@@ -100,6 +130,7 @@ import { ref, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { learnerApi, knowledgeApi, blueprintApi } from '@/api'
 import { ElMessage } from 'element-plus'
+import TemplateSelector from '@/components/TemplateSelector.vue'
 
 const router       = useRouter()
 const route        = useRoute()
@@ -109,6 +140,12 @@ const domainsLoading = ref(false)
 const generating   = ref(false)
 const generatingMsg = ref('正在生成蓝图…')
 const teacherInstruction = ref('')
+const selectedTheoryTemplateId = ref<string | null>(null)
+const selectedTaskTemplateId = ref<string | null>(null)
+const selectedProjectTemplateId = ref<string | null>(null)
+const theoryContent = ref('')
+const taskContent = ref('')
+const projectContent = ref('')
 const path         = ref<any>(null)
 const domains      = ref<any[]>([])
 let pollTimer: any = null
@@ -177,7 +214,10 @@ async function generate() {
   generating.value = true
   path.value = null
   try {
-    await blueprintApi.generate(topicKey.value, !!path.value, teacherInstruction.value || undefined)
+    await blueprintApi.generate(
+      topicKey.value, !!path.value, teacherInstruction.value || undefined,
+      { theory: theoryContent.value, task: taskContent.value, project: projectContent.value }
+    )
     startPolling()
   } catch {
     generating.value = false

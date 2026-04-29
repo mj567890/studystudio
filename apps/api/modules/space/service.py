@@ -344,7 +344,20 @@ class SpaceService:
         if not role:
             raise SpaceError("SPACE_403", "You are not a member of this space")
 
-    # -- 内部 ----------------------------------------------------------------
+    # -- 权限校验（公开） ----------------------------------------------------
+
+    async def require_space_owner(
+        self, space_id: str | UUID, user_id: str | UUID
+    ) -> str:
+        """校验用户是否为空间所有者（仅 owner，不含 admin）。"""
+        role = await self.repo.get_member_role(space_id, user_id)
+        if not role:
+            raise SpaceError("SPACE_403", "You are not a member of this space")
+        if role != "owner":
+            raise SpaceError(
+                "SPACE_403", "Only the space owner can perform this action"
+            )
+        return role
 
     async def _require_manager(
         self, space_id: str | UUID, user_id: str | UUID

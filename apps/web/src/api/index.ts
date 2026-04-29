@@ -85,10 +85,30 @@ export const authApi = {
 export const blueprintApi = {
   getStatus: (topic: string) =>
     http.get(`/blueprints/${topic}/status`),
-  generate: (topic: string, force = false, teacherInstruction?: string) =>
+  generate: (topic: string, force = false, teacherInstruction?: string, typeInstructions?: Record<string, string>) =>
     http.post(`/blueprints/${topic}/generate`, {
       force_regen: force,
       teacher_instruction: teacherInstruction || undefined,
+      type_instructions: typeInstructions || undefined,
+    }),
+}
+
+// ── Course Templates ──────────────────────────────────────────────
+export const templateApi = {
+  list: () => http.get('/course-templates'),
+  get: (templateId: string) => http.get(`/course-templates/${templateId}`),
+  create: (data: { name: string; content: string; is_public?: boolean }) =>
+    http.post('/course-templates', data),
+  update: (templateId: string, data: { name?: string; content?: string; is_public?: boolean }) =>
+    http.put(`/course-templates/${templateId}`, data),
+  delete: (templateId: string) => http.delete(`/course-templates/${templateId}`),
+  setSpaceDefault: (spaceId: string, templateId: string | null,
+                    theoryId?: string | null, taskId?: string | null, projectId?: string | null) =>
+    http.put(`/spaces/${spaceId}/default-template`, {
+      template_id: templateId,
+      theory_template_id: theoryId,
+      task_template_id: taskId,
+      project_template_id: projectId,
     }),
 }
 

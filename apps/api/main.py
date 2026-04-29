@@ -103,6 +103,8 @@ def create_app() -> FastAPI:
     app.include_router(eight_dim_router)
     app.include_router(health_router, prefix="/api/admin/health", tags=["admin-health"])
     app.include_router(task_router, tags=["admin-tasks"])
+    from apps.api.modules.course_template.router import router as template_router
+    app.include_router(template_router)
 
     @app.on_event("startup")
     async def startup() -> None:
@@ -209,9 +211,53 @@ def create_app() -> FastAPI:
             topic_key = payload.get("topic_key")
             if not topic_key:
                 return
-            logger.info("knowledge_extracted → triggering blueprint synthesis", topic_key=topic_key)
+            # 解析空间三课型默认模板 + 全局默认
+            teacher_instruction = None
+            type_instructions: dict | None = None
+            if space_id:
+                from sqlalchemy import text
+                async with async_session_factory() as session:
+                    try:
+                        row = await session.execute(
+                            text("""SELECT
+                                    ks.default_template_id,
+                                    ks.default_theory_template_id,
+                                    ks.default_task_template_id,
+                                    ks.default_project_template_id,
+                                    ct_def.content  AS def_content,
+                                    ct_theory.content AS theory_content,
+                                    ct_task.content   AS task_content,
+                                    ct_project.content AS project_content
+                                FROM knowledge_spaces ks
+                                LEFT JOIN course_templates ct_def
+                                    ON ct_def.template_id = ks.default_template_id
+                                LEFT JOIN course_templates ct_theory
+                                    ON ct_theory.template_id = ks.default_theory_template_id
+                                LEFT JOIN course_templates ct_task
+                                    ON ct_task.template_id = ks.default_task_template_id
+                                LEFT JOIN course_templates ct_project
+                                    ON ct_project.template_id = ks.default_project_template_id
+                                WHERE ks.space_id = CAST(:sid AS uuid)"""),
+                            {"sid": space_id}
+                        )
+                        r = row.fetchone()
+                        if r:
+                            teacher_instruction = r.def_content
+                            type_instructions = {
+                                "theory":  r.theory_content or "",
+                                "task":    r.task_content or "",
+                                "project": r.project_content or "",
+                            }
+                    except Exception:
+                        pass  # 优雅降级
+            logger.info("knowledge_extracted → triggering blueprint synthesis",
+                        topic_key=topic_key, has_template=teacher_instruction is not None,
+                        has_type_templates=type_instructions is not None)
             from apps.api.tasks.blueprint_tasks import synthesize_blueprint
-            synthesize_blueprint.apply_async(args=[topic_key, space_id], queue="knowledge")
+            synthesize_blueprint.apply_async(
+                args=[topic_key, space_id, teacher_instruction, type_instructions],
+                queue="knowledge"
+            )
 
         await event_bus.subscribe(
             event_name="knowledge_extracted",

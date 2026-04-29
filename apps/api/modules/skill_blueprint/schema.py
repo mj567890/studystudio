@@ -52,3 +52,4 @@ class GenerateBlueprintRequest(BaseModel):
     space_id:            Optional[str] = None
     force_regen:         bool = False
     teacher_instruction: Optional[str] = None
+    type_instructions:   Optional[dict] = None  # {"theory": "...", "task": "...", "project": "..."}

@@ -78,6 +78,10 @@
                 <el-button size="small" :type="progress[currentChapter.chapter_id]?.status==='skipped'?'warning':'default'" @click="markChapter(currentChapter,'skipped')">忽略</el-button>
                 <el-button v-if="readMode==='deep'" size="small" plain @click="openSource">📄 查看原文</el-button>
                 <el-button
+                  size="small" type="warning" plain
+                  :loading="refiningChapterId === currentChapter?.chapter_id"
+                  @click="refineChapter">✨ 精调本章</el-button>
+                <el-button
                   v-if="allCompleted"
                   size="small" type="warning"
                   :loading="certLoading"
@@ -401,7 +405,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, reactive, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
 import { learnerApi, knowledgeApi, tutorialApi, teachingApi, recommendApi, errorPatternApi, certificateApi } from '@/api'
 import WallSection from '@/components/WallSection.vue'
@@ -637,6 +641,7 @@ async function markChapter(chapter: any, newStatus: string) {
 }
 
 const certLoading = ref(false)
+const refiningChapterId = ref<string | null>(null)
 
 const allCompleted = computed(() => {
   const all = tutorial.value?.stages?.flatMap((s: any) => s.chapters || []) || []
@@ -855,6 +860,31 @@ async function openSource() {
     sourcePages.value = []
   } finally {
     sourceLoading.value = false
+  }
+}
+
+async function refineChapter() {
+  if (!currentChapter.value) return
+  const ch = currentChapter.value
+  const result = await (ElMessageBox as any).prompt(
+    '输入修改指令，AI 将按你的要求重写本章。\n\n例如："增加实操案例，弱化理论推导"、"加入航空维修安全规范"、"难度下调，适配中职基础"',
+    `精调章节：${ch.title}`,
+    { inputType: 'textarea', inputRows: 4, confirmButtonText: '执行精调', cancelButtonText: '取消' }
+  ).catch(() => null)
+  if (!result?.value?.trim()) return
+  refiningChapterId.value = ch.chapter_id
+  try {
+    const { http } = await import('@/api')
+    await http.post(`/admin/courses/chapters/${ch.chapter_id}/refine`, {
+      instruction: result.value.trim()
+    }, { timeout: 180000 })
+    ElMessage.success('章节已按你的指令更新')
+    // 重新加载课程以获取更新的章节内容
+    await loadTutorial()
+  } catch (err: any) {
+    ElMessage.error('精调失败：' + (err?.response?.data?.msg || err?.message || '未知'))
+  } finally {
+    refiningChapterId.value = null
   }
 }
 
