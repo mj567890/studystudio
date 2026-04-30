@@ -2043,8 +2043,23 @@ async def _regenerate_all_chapters_async(blueprint_id: str) -> None:
             )
             chapters.extend([dict(r._mapping) for r in ch_result.fetchall()])
 
+    # 读取全局教师指令
+    global_instruction = None
+    async with SF() as session:
+        row = await session.execute(
+            text("SELECT teacher_instruction FROM skill_blueprints WHERE blueprint_id=CAST(:bid AS uuid)"),
+            {"bid": blueprint_id}
+        )
+        bp = row.fetchone()
+        if bp and bp.teacher_instruction:
+            global_instruction = bp.teacher_instruction
+
     logger.info("[regen_all] chapters to process", total=len(chapters), blueprint_id=blueprint_id)
     llm = get_llm_gateway()
+
+    instruction_block = TEACHER_INSTRUCTION_PREFIX.format(
+        instruction=global_instruction or ""
+    )
 
     for idx, ch in enumerate(chapters, start=1):
         chapter_id = ch["chapter_id"]
@@ -2053,6 +2068,7 @@ async def _regenerate_all_chapters_async(blueprint_id: str) -> None:
                 chapter_title=ch["title"] or "",
                 objective=ch["objective"] or "",
                 task_description=ch["task_description"] or "",
+                teacher_instruction=instruction_block,
             )
             content = await asyncio.wait_for(
                 llm.generate(prompt, model_route="tutorial_content"),

@@ -474,18 +474,42 @@ class SpaceService:
     async def soft_delete_space(
         self, space_id: str | UUID, user_id: str | UUID
     ) -> dict:
-        """软删除：将空间移入回收站。"""
+        """软删除：将空间移入回收站，通知所有成员。"""
         sid = str(space_id)
         uid = str(user_id)
         await self._require_manager(sid, uid)
 
         fork_count = await self.repo.count_direct_forks(sid)
 
+        # 获取空间名称和成员列表（删除前）
+        try:
+            space = await self.repo.get_space_with_role(sid, uid)
+            space_name = space.get("name", sid) if space else sid
+        except Exception:
+            space_name = sid
+        members = await self.repo.list_members(sid)
+
         await self.repo.soft_delete_space(sid, uid)
         await self.db.commit()
 
+        # 通知所有成员（排除删除者本人）
+        try:
+            from apps.api.modules.knowledge.notification_router import send_notification
+            for m in members:
+                if m["user_id"] != uid:
+                    await send_notification(
+                        user_id=m["user_id"],
+                        notification_type="space_deleted",
+                        title=f"课程「{space_name}」已被删除",
+                        message=f"课程「{space_name}」已被作者删除，你的学习记录将保留但课程不再可访问。",
+                        target_type="space",
+                        target_id=sid,
+                    )
+        except Exception as e:
+            logger.warning("Failed to send deletion notifications", error=str(e))
+
         logger.info("Space soft-deleted", space_id=sid, user_id=uid,
-                     fork_count=fork_count)
+                     fork_count=fork_count, notified=len(members))
 
         return {
             "space_id":             sid,

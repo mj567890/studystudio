@@ -393,7 +393,7 @@
           <span class="source-doc-name">{{ doc.file_name || doc.title }}</span>
         </div>
         <div v-for="chunk in doc.chunks" :key="chunk.chunk_id" class="source-chunk">
-          <div v-if="chunk.page_no" class="source-page-num">第 {{ chunk.page_no }} 页</div>
+          <div v-if="chunk.page_no" class="source-page-num" :class="{ 'source-page-link': chunk.document_id }" @click="chunk.document_id && openDocumentAtPage(chunk.document_id, chunk.page_no)">第 {{ chunk.page_no }} 页</div>
           <div class="source-text">{{ chunk.content }}</div>
         </div>
       </div>
@@ -418,7 +418,7 @@ import { ref, computed, watch, onMounted, reactive, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
-import { learnerApi, knowledgeApi, tutorialApi, teachingApi, recommendApi, errorPatternApi, certificateApi, adminApi } from '@/api'
+import { learnerApi, knowledgeApi, tutorialApi, teachingApi, recommendApi, errorPatternApi, certificateApi, adminApi, fileApi } from '@/api'
 import WallSection from '@/components/WallSection.vue'
 import RefineChapterDialog from '@/components/RefineChapterDialog.vue'
 import { useRefineChapter } from '@/composables/useRefineChapter'
@@ -852,10 +852,21 @@ const sourceDocs = computed(() => {
     if (!map.has(key)) {
       map.set(key, { document_id: key, file_name: s.file_name, title: s.title, chunks: [] })
     }
-    map.get(key)!.chunks.push(s)
+    map.get(key)!.chunks.push({ ...s, document_id: key })
   }
   return [...map.values()]
 })
+
+async function openDocumentAtPage(documentId: string, pageNo: number) {
+  try {
+    const res: any = await fileApi.viewDocument(documentId)
+    const data = res.data
+    if (data?.mode === 'url' && data.url) {
+      window.open(data.url + '#page=' + pageNo, '_blank')
+    }
+  } catch { /* 静默失败 */ }
+}
+
 const sourceVisible  = ref(false)
 const sourceLoading  = ref(false)
 const sourcePages    = ref<any[]>([])
@@ -1061,6 +1072,15 @@ onMounted(async () => {
   font-size: 12px;
   color: #909399;
   margin-bottom: 4px;
+}
+.source-page-link {
+  color: #409eff;
+  cursor: pointer;
+  text-decoration: underline;
+  display: inline-block;
+}
+.source-page-link:hover {
+  color: #337ecc;
 }
 .source-text {
   background: #f5f7fa;
