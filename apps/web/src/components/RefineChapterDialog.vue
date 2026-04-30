@@ -2,7 +2,7 @@
   <el-dialog
     :model-value="visible"
     :title="`精调章节：${chapter?.title || ''}`"
-    width="640px"
+    width="720px"
     destroy-on-close
     @update:model-value="(v: boolean) => !v && $emit('close')"
   >
@@ -16,16 +16,27 @@
       </span>
     </div>
 
-    <!-- 当前内容预览 -->
-    <div class="refine-section">
-      <div class="refine-label">当前内容预览（前 300 字）</div>
-      <div class="refine-preview" v-if="detail?.content_summary">
-        {{ detail.content_summary }}
-      </div>
-      <div class="refine-preview refine-preview--empty" v-else>
-        <template v-if="detailLoading">加载中…</template>
-        <template v-else>该章节暂无内容</template>
-      </div>
+    <!-- 套用模板 -->
+    <div class="refine-section" v-if="templates.length">
+      <div class="refine-label">套用模板</div>
+      <el-select
+        v-model="selectedTemplateId"
+        placeholder="选择已有模板快速填入指令…"
+        clearable
+        size="small"
+        style="width: 100%"
+        @change="applyTemplate"
+      >
+        <el-option
+          v-for="t in templates"
+          :key="t.template_id"
+          :label="t.name"
+          :value="t.template_id"
+        >
+          <span>{{ t.name }}</span>
+          <span style="float:right;color:#909399;font-size:12px;margin-left:8px">{{ t.content?.substring(0, 40) }}…</span>
+        </el-option>
+      </el-select>
     </div>
 
     <!-- 修改指令 -->
@@ -34,7 +45,7 @@
       <el-input
         v-model="instruction"
         type="textarea"
-        :rows="4"
+        :rows="10"
         placeholder="输入修改指令，AI 将按你的要求重写本章。&#10;&#10;例如：&quot;增加实操案例，弱化理论推导&quot;、&quot;加入航空维修安全规范&quot;、&quot;难度下调，适配中职基础&quot;"
       />
       <!-- 快捷指令 -->
@@ -96,7 +107,7 @@
 
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { adminApi } from '@/api'
+import { adminApi, templateApi } from '@/api'
 
 const props = defineProps<{
   visible: boolean
@@ -115,7 +126,8 @@ const instruction = ref('')
 const autoRegenQuiz = ref(true)
 const autoRegenDiscussion = ref(false)
 const detail = ref<any>(null)
-const detailLoading = ref(false)
+const templates = ref<any[]>([])
+const selectedTemplateId = ref<string | null>(null)
 
 const presets = [
   '增加实操案例',
@@ -127,6 +139,13 @@ const presets = [
 
 function fillPreset(text: string) {
   instruction.value = instruction.value ? instruction.value + '；' + text : text
+}
+
+function applyTemplate(templateId: string | null) {
+  if (!templateId) return
+  const t = templates.value.find((x: any) => x.template_id === templateId)
+  if (t) instruction.value = t.content || ''
+  selectedTemplateId.value = null
 }
 
 function formatTime(iso: string) {
@@ -145,15 +164,17 @@ watch(() => [props.visible, props.chapter], async ([vis, ch]) => {
   autoRegenQuiz.value = true
   autoRegenDiscussion.value = false
 
-  // 加载章节详情
-  detailLoading.value = true
+  // 并行加载章节详情 + 模板列表
   try {
-    const { data } = await adminApi.getChapterDetail((ch as any).chapter_id)
-    detail.value = data?.data ?? null
+    const [detailRes, tmplRes] = await Promise.all([
+      adminApi.getChapterDetail((ch as any).chapter_id),
+      templateApi.list(),
+    ])
+    detail.value = detailRes.data ?? null
+    templates.value = tmplRes.data?.templates || []
   } catch {
     detail.value = null
-  } finally {
-    detailLoading.value = false
+    templates.value = []
   }
 })
 </script>
@@ -177,21 +198,6 @@ watch(() => [props.visible, props.chapter], async ([vis, ch]) => {
   font-weight: 600;
   color: #303133;
   margin-bottom: 6px;
-}
-.refine-preview {
-  background: #f5f7fa;
-  border-radius: 4px;
-  padding: 10px 12px;
-  font-size: 13px;
-  color: #606266;
-  max-height: 120px;
-  overflow-y: auto;
-  white-space: pre-wrap;
-  line-height: 1.5;
-}
-.refine-preview--empty {
-  color: #c0c4cc;
-  font-style: italic;
 }
 .refine-presets {
   display: flex;
