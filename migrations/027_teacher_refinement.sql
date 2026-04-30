@@ -12,3 +12,6 @@ ALTER TABLE skill_chapters ADD COLUMN IF NOT EXISTS refinement_version integer D
 -- Layer 3: 自动联动开关（蓝图级别，教师可控制）
 ALTER TABLE skill_blueprints ADD COLUMN IF NOT EXISTS auto_regen_quiz boolean DEFAULT true;
 ALTER TABLE skill_blueprints ADD COLUMN IF NOT EXISTS auto_regen_discussion boolean DEFAULT false;
+
+-- Layer 2 增强: 精调前备份，支持回滚
+ALTER TABLE skill_chapters ADD COLUMN IF NOT EXISTS previous_content_text text;

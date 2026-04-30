@@ -1217,6 +1217,8 @@ async def list_course_chapters(
                 "chapter_order": c["chapter_order"],
                 "status": c["status"],
                 "has_content": bool(c.get("content_text") and c["content_text"].strip()),
+                "refinement_version": c.get("refinement_version") or 0,
+                "refined_at": c["refined_at"].isoformat() if c.get("refined_at") else None,
             }
             for c in chapters_raw
         ]
@@ -1228,6 +1230,51 @@ async def list_course_chapters(
             "chapters": chapters,
         })
     return {"code": 200, "data": {"topic_key": topic_key, "space_id": space_id, "stages": stages}}
+
+
+@router.get("/admin/courses/chapters/{chapter_id}")
+async def get_chapter_detail(
+    chapter_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """获取章节详情，供精调对话框展示当前内容和版本信息。"""
+    row = (await db.execute(
+        text("""SELECT sc.chapter_id::text, sc.title, sc.objective,
+                       sc.content_text, sc.refinement_version, sc.refined_at,
+                       sc.previous_content_text,
+                       sb.space_id::text
+                FROM skill_chapters sc
+                JOIN skill_blueprints sb ON sb.blueprint_id = sc.blueprint_id
+                WHERE sc.chapter_id = CAST(:cid AS uuid)"""),
+        {"cid": chapter_id}
+    )).fetchone()
+    if not row:
+        raise HTTPException(404, detail={"msg": "章节不存在"})
+
+    # 提取内容摘要（取前 300 字）
+    content_json = row.content_text or "{}"
+    content_summary = ""
+    try:
+        data = json.loads(content_json) if isinstance(content_json, str) else content_json
+        scene = data.get("scene_hook", "") or ""
+        full = data.get("full_content", "") or ""
+        content_summary = (scene + "\n" + full)[:300]
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    return {
+        "code": 200,
+        "data": {
+            "chapter_id": str(row.chapter_id),
+            "title": row.title,
+            "objective": row.objective,
+            "refinement_version": row.refinement_version or 0,
+            "refined_at": row.refined_at.isoformat() if row.refined_at else None,
+            "has_previous_content": bool(row.previous_content_text),
+            "content_summary": content_summary,
+        }
+    }
 
 
 @router.post("/admin/courses/chapters/{chapter_id}/regenerate")
@@ -1362,6 +1409,14 @@ async def refine_chapter(
     except (json.JSONDecodeError, TypeError):
         current_summary = str(content_json)[:500]
 
+    # 2.5. 备份当前内容（精调前保存，支持回滚）
+    await db.execute(
+        text("""UPDATE skill_chapters SET previous_content_text = content_text
+               WHERE chapter_id = CAST(:cid AS uuid)"""),
+        {"cid": chapter_id}
+    )
+    await db.commit()
+
     # 3. 构建全局约束块
     global_block = TEACHER_INSTRUCTION_PREFIX.format(
         instruction=row.teacher_instruction or "无特殊要求"
@@ -1447,6 +1502,57 @@ async def refine_chapter(
             "quiz_invalidated": quiz_invalidated,
             "quiz_regeneration_queued": quiz_queued,
             "discussion_queued": discussion_queued,
+        }
+    }
+
+
+@router.post("/admin/courses/chapters/{chapter_id}/rollback")
+async def rollback_chapter(
+    chapter_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """回滚章节到上一次精调前的版本。需要空间所有者权限。"""
+    from apps.api.modules.space.service import SpaceService, SpaceError
+    space_id = await _get_space_id_from_chapter(db, chapter_id)
+    if not space_id:
+        raise HTTPException(404, detail={"msg": "章节不存在或已删除"})
+    try:
+        await SpaceService(db).require_space_owner(space_id, current_user["user_id"])
+    except SpaceError as e:
+        raise HTTPException(403, detail={"code": e.code, "msg": e.msg})
+
+    row = (await db.execute(
+        text("""SELECT previous_content_text, content_text, title, refinement_version
+               FROM skill_chapters WHERE chapter_id = CAST(:cid AS uuid)"""),
+        {"cid": chapter_id}
+    )).fetchone()
+
+    if not row:
+        raise HTTPException(404, detail={"msg": "章节不存在"})
+    if not row.previous_content_text:
+        return {"code": 400, "msg": "没有可回滚的历史版本", "data": {}}
+
+    # 执行回滚：previous_content_text → content_text
+    await db.execute(
+        text("""UPDATE skill_chapters SET
+               content_text = previous_content_text,
+               previous_content_text = NULL,
+               refinement_version = GREATEST(COALESCE(refinement_version, 0) - 1, 0),
+               refined_at = NULL,
+               updated_at = now()
+               WHERE chapter_id = CAST(:cid AS uuid)"""),
+        {"cid": chapter_id}
+    )
+    await db.commit()
+
+    return {
+        "code": 200,
+        "data": {
+            "chapter_id": chapter_id,
+            "rollback_success": True,
+            "title": row.title,
+            "previous_version": row.refinement_version,
         }
     }
 

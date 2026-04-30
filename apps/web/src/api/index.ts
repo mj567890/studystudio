@@ -235,6 +235,10 @@ export const adminApi = {
   reparseDocument: (documentId: string) => http.post(`/files/reparse/${documentId}`),
   refineChapter: (chapterId: string, data: { instruction: string; auto_regenerate_quiz?: boolean; auto_regenerate_discussion?: boolean }) =>
     http.post(`/admin/courses/chapters/${chapterId}/refine`, data),
+  rollbackChapter: (chapterId: string) =>
+    http.post(`/admin/courses/chapters/${chapterId}/rollback`),
+  getChapterDetail: (chapterId: string) =>
+    http.get(`/admin/courses/chapters/${chapterId}`),
   backfillPageNo:   ()    => http.post('/admin/documents/backfill-page-no'),
   getStats:         ()    => http.get('/admin/system/stats'),
 

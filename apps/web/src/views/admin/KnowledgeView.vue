@@ -179,6 +179,17 @@
 
     </el-tabs>
   </div>
+
+  <!-- 精调章节对话框 -->
+  <RefineChapterDialog
+    :visible="refine.dialogVisible.value"
+    :chapter="refine.currentChapter.value"
+    :submitting="refine.refining.value"
+    :rolling-back="refine.rollingBack.value"
+    @close="refine.close(); refiningId = null"
+    @submit="handleRefineSubmit"
+    @rollback="refine.rollback()"
+  />
 </template>
 
 <script setup lang="ts">
@@ -187,6 +198,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { adminApi, knowledgeApi } from '@/api'
 import { Loading } from '@element-plus/icons-vue'
+import RefineChapterDialog from '@/components/RefineChapterDialog.vue'
+import { useRefineChapter } from '@/composables/useRefineChapter'
 import axios from 'axios'
 const _http = axios.create({ baseURL: '/api', timeout: 30000 })
 _http.interceptors.request.use((cfg: any) => { const tk = localStorage.getItem('access_token'); if (tk) cfg.headers.Authorization = `Bearer ${tk}`; return cfg })
@@ -208,6 +221,11 @@ const openStages        = ref<string[]>([])
 const regeneratingId    = ref<string | null>(null)
 const refiningId        = ref<string | null>(null)
 const previewTopicKey   = ref('')
+
+// 精调 composable
+const refine = useRefineChapter(() => {
+  if (currentCourse.value) openCourseDrawer(currentCourse.value)
+})
 const totalChapters     = computed(() => courseStages.value.reduce((s: number, st: any) => s + st.chapters.length, 0))
 const totalWithContent  = computed(() => courseStages.value.reduce((s: number, st: any) => s + st.chapters.filter((c: any) => c.has_content).length, 0))
 
@@ -255,23 +273,18 @@ async function regenChapter(chapter: any) {
   } finally { regeneratingId.value = null }
 }
 
-async function refineChapter(chapter: any) {
-  const result = await (ElMessageBox as any).prompt(
-    '输入修改指令，AI 将按你的要求重写本章。\n\n例如："增加实操案例，弱化理论推导"、"加入航空维修安全规范"、"难度下调，适配中职基础"',
-    `精调章节：${chapter.title}`,
-    { inputType: 'textarea', inputRows: 4, confirmButtonText: '执行精调', cancelButtonText: '取消' }
-  ).catch(() => null)
-  if (!result?.value?.trim()) return
+function refineChapter(chapter: any) {
   refiningId.value = chapter.chapter_id
+  refine.open(chapter)
+}
+// 精调提交时同步 refiningId（给按钮 loading）
+async function handleRefineSubmit(instruction: string, autoQuiz: boolean, autoDiscuss: boolean) {
+  refiningId.value = (refine.currentChapter.value as any)?.chapter_id || null
   try {
-    await _http.post(`/admin/courses/chapters/${chapter.chapter_id}/refine`, {
-      instruction: result.value.trim()
-    }, { timeout: 180000 })
-    ElMessage.success('章节已按你的指令更新')
-    if (currentCourse.value) openCourseDrawer(currentCourse.value)
-  } catch (err: any) {
-    ElMessage.error('精调失败：' + (err?.response?.data?.msg || err?.message || '未知'))
-  } finally { refiningId.value = null }
+    await refine.submit(instruction, autoQuiz, autoDiscuss)
+  } finally {
+    refiningId.value = null
+  }
 }
 
 async function regenAll(course: any) {
