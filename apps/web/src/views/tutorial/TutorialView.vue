@@ -82,6 +82,14 @@
                   :loading="refiningChapterId === currentChapter?.chapter_id"
                   @click="refineChapter">✨ 精调本章</el-button>
                 <el-button
+                  size="small" type="danger" plain
+                  :loading="regeneratingChapterId === currentChapter?.chapter_id"
+                  @click="regenerateChapter">🔄 重新生成</el-button>
+                <el-button
+                  v-if="tutorial?.source === 'blueprint' && needsCalibration"
+                  size="small" type="success"
+                  @click="calibrationDialogVisible = true">🎯 补充经验校准</el-button>
+                <el-button
                   v-if="allCompleted"
                   size="small" type="warning"
                   :loading="certLoading"
@@ -114,6 +122,18 @@
               <div class="content">
                 <template v-for="(seg,idx) in contentSegments" :key="idx">
                   <div v-if="seg.type==='text'" v-html="renderTerms(seg.text)" class="para" />
+                  <div v-else-if="seg.type==='diagram'" class="diagram-block">
+                    <img v-if="seg.url" :src="seg.url" class="diagram-img"
+                         @click="openDiagramViewer(seg.url)" loading="lazy"
+                         :alt="'图表 ' + (seg.index + 1)" title="点击放大" />
+                    <div v-else-if="seg.loading" class="diagram-placeholder">
+                      <el-icon style="font-size:20px"><Loading /></el-icon>
+                      <span>图表加载中...</span>
+                    </div>
+                    <div v-else-if="seg.empty" class="diagram-placeholder diagram-empty">
+                      <span>图表 {{ seg.index + 1 }} 渲染失败或无可用提供商</span>
+                    </div>
+                  </div>
                   <div v-else class="checkpoint-bubble">
                     <div class="checkpoint-q">
                       <span>⏸</span><span>{{ seg.question }}</span>
@@ -400,6 +420,13 @@
     </div>
   </el-drawer>
 
+  <!-- 图表放大查看 -->
+  <el-dialog v-model="diagramViewerVisible" title="图表查看" width="80%" :destroy-on-close="true" center>
+    <div style="text-align:center;max-height:70vh;overflow:auto">
+      <img :src="diagramViewerUrl" style="max-width:100%;height:auto" />
+    </div>
+  </el-dialog>
+
   <!-- 精调章节对话框 -->
   <RefineChapterDialog
     :visible="refine.dialogVisible.value"
@@ -411,6 +438,25 @@
     @rollback="refine.rollback()"
   />
 
+  <!-- 重新生成章节对话框 -->
+  <RegenerateChapterDialog
+    :visible="regenerate.dialogVisible.value"
+    :chapter="regenerate.currentChapter.value"
+    :submitting="regenerate.regenerating.value"
+    @close="regenerate.close(); regeneratingChapterId = null"
+    @submit="handleRegenerateSubmit"
+  />
+
+  <!-- ★v2.2: 补答经验校准对话框 -->
+  <CalibrationDialog
+    :visible="calibrationDialogVisible"
+    :topic-key="topicKey"
+    :space-id="tutorial?.space_id"
+    :regen-after-submit="true"
+    @update:visible="calibrationDialogVisible = $event"
+    @done="onCalibrationDone"
+  />
+
 </template>
 
 <script setup lang="ts">
@@ -418,10 +464,13 @@ import { ref, computed, watch, onMounted, reactive, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
-import { learnerApi, knowledgeApi, tutorialApi, teachingApi, recommendApi, errorPatternApi, certificateApi, adminApi, fileApi } from '@/api'
+import { learnerApi, knowledgeApi, tutorialApi, teachingApi, recommendApi, errorPatternApi, certificateApi, adminApi, fileApi, blueprintApi } from '@/api'
 import WallSection from '@/components/WallSection.vue'
 import RefineChapterDialog from '@/components/RefineChapterDialog.vue'
+import RegenerateChapterDialog from '@/components/RegenerateChapterDialog.vue'
+import CalibrationDialog from '@/components/CalibrationDialog.vue'
 import { useRefineChapter } from '@/composables/useRefineChapter'
+import { useRegenerateChapter } from '@/composables/useRegenerateChapter'
 
 async function getNewApis() {
   const mod = await import('@/api')
@@ -448,6 +497,26 @@ const tutorial       = ref<any>(null)
 const currentChapter = ref<any>(null)
 const progress       = ref<Record<string,any>>({})
 const readMode       = ref<'skim'|'normal'|'deep'>('normal')
+
+const chapterDiagrams = ref<any[]>([])
+const diagramsLoaded = ref(false)
+const diagramViewerVisible = ref(false)
+const diagramViewerUrl = ref('')
+
+function openDiagramViewer(url: string) {
+  diagramViewerUrl.value = url
+  diagramViewerVisible.value = true
+}
+
+async function loadDiagrams(chapterId: string) {
+  chapterDiagrams.value = []
+  diagramsLoaded.value = false
+  try {
+    const res: any = await teachingApi.getChapterDiagrams(chapterId)
+    chapterDiagrams.value = res.data?.diagrams || []
+  } catch (_) {}
+  diagramsLoaded.value = true
+}
 
 const chapterContent = computed(() => {
   const ch = currentChapter.value
@@ -500,7 +569,28 @@ const contentSegments = computed(() => {
   const segs: any[] = []
   for (let i = 0; i < parts.length; i++) {
     if (i % 2 === 0) {
-      if (parts[i].trim()) segs.push({ type: 'text', text: parts[i] })
+      // 文本段 → 二次拆分 DIAGRAM 标记
+      if (parts[i].trim()) {
+        const diagParts = parts[i].split(/<!--DIAGRAM:(\d+)-->/)
+        for (let j = 0; j < diagParts.length; j++) {
+          if (j % 2 === 0) {
+            if (diagParts[j].trim()) segs.push({ type: 'text', text: diagParts[j] })
+          } else {
+            const diagIndex = parseInt(diagParts[j])
+            if (!isNaN(diagIndex)) {
+              const diag = chapterDiagrams.value[diagIndex]
+              segs.push({
+                type: 'diagram',
+                index: diagIndex,
+                url: diag?.url || '',
+                content_type: diag?.content_type || '',
+                loading: !diagramsLoaded.value,
+                empty: diagramsLoaded.value && !diag,
+              })
+            }
+          }
+        }
+      }
     } else {
       const [question, hint = ''] = parts[i].split('|')
       segs.push({ type: 'checkpoint', question: question.trim(), hint: hint.trim() })
@@ -580,6 +670,7 @@ async function loadTutorial() {
     }
   } finally { loading.value = false }
   checkSubscriptionUpdate()
+  checkCalibrationStatus()
 }
 
 async function selectChapter(ch: any) {
@@ -606,6 +697,7 @@ async function selectChapter(ch: any) {
     } catch (_) {}
   }
   loadSocialNotes(ch.chapter_id)
+  loadDiagrams(ch.chapter_id)
 }
 
 function onTopicChange() { loadTutorial() }
@@ -655,11 +747,38 @@ async function markChapter(chapter: any, newStatus: string) {
 
 const certLoading = ref(false)
 const refiningChapterId = ref<string | null>(null)
+const regeneratingChapterId = ref<string | null>(null)
 
 // 精调 composable
 const refine = useRefineChapter(async () => {
   await loadTutorial()
 })
+
+const regenerate = useRegenerateChapter(async () => {
+  await loadTutorial()
+  if (currentChapter.value) await selectChapter(currentChapter.value)
+})
+
+// ★v2.2: 已有课程补答经验校准
+const calibrationDialogVisible = ref(false)
+const needsCalibration = ref(false)
+
+async function checkCalibrationStatus() {
+  if (!topicKey.value || tutorial.value?.source !== 'blueprint') return
+  try {
+    const res: any = await blueprintApi.getCourseMap(topicKey.value, tutorial.value?.space_id)
+    const score = res.data?.confidence_score
+    needsCalibration.value = (score === null || score === undefined || score === 0)
+  } catch (_) {
+    needsCalibration.value = true
+  }
+}
+
+function onCalibrationDone(_result: { confidenceScore: number; answeredCount: number; answers: Record<string, any> }) {
+  needsCalibration.value = false
+  calibrationDialogVisible.value = false
+  ElMessage.success('经验校准已保存，建议刷新页面查看重建后的课程')
+}
 
 const allCompleted = computed(() => {
   const all = tutorial.value?.stages?.flatMap((s: any) => s.chapters || []) || []
@@ -899,6 +1018,20 @@ function refineChapter() {
   refine.open(ch as any)
 }
 
+function regenerateChapter() {
+  if (!currentChapter.value) return
+  regenerate.open(currentChapter.value as any)
+}
+
+async function handleRegenerateSubmit(instruction: string) {
+  regeneratingChapterId.value = (regenerate.currentChapter.value as any)?.chapter_id || null
+  try {
+    await regenerate.submit(instruction)
+  } finally {
+    regeneratingChapterId.value = null
+  }
+}
+
 async function handleRefineSubmit(instruction: string, autoQuiz: boolean, autoDiscuss: boolean) {
   refiningChapterId.value = (refine.currentChapter.value as any)?.chapter_id || null
   try {
@@ -1092,5 +1225,39 @@ onMounted(async () => {
   border-radius: 0 4px 4px 0;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* ── 图表渲染 ── */
+.diagram-block {
+  margin: 20px 0;
+  text-align: center;
+}
+.diagram-img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+  cursor: pointer;
+  transition: box-shadow 0.2s;
+}
+.diagram-img:hover {
+  box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+}
+.diagram-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 32px;
+  color: #909399;
+  background: #f5f7fa;
+  border: 1px dashed #dcdfe6;
+  border-radius: 8px;
+  font-size: 14px;
+}
+.diagram-empty {
+  color: #e6a23c;
+  background: #fdf6ec;
+  border-color: #faecd8;
 }
 </style>

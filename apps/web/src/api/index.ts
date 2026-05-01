@@ -179,6 +179,13 @@ export const blueprintApi = {
     marked_chapters?: Record<string, any>
   }) =>
     http.post(`/blueprints/${topic}/course-map/regenerate`, data),
+
+  submitCalibration: (topic: string, data: {
+    space_id: string
+    answers: Record<string, any>
+    regenerate?: boolean
+  }) =>
+    http.post(`/blueprints/${topic}/submit-calibration`, data),
 }
 
 // ── Course Templates ──────────────────────────────────────────────

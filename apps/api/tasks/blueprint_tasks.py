@@ -2277,6 +2277,43 @@ async def _load_global_context_from_db(session, space_id: str, topic_key: str,
     return context
 
 
+def _build_chapter_calibration_text(routing: dict) -> str:
+    """将 Course Map 的 calibration_routing 转换为 prompt 可用的文本。
+    用于 regen_all、单章重建、merge 等非首次生成的场景。
+    """
+    if not routing:
+        return ""
+
+    parts = []
+    pain_points = routing.get("pain_points", [])
+    if pain_points:
+        pp_labels = [p.get("label", str(p)) for p in pain_points]
+        parts.append(f"- 本章真痛点（来自教师勾选）：{'；'.join(pp_labels)}")
+
+    cases = routing.get("cases", [])
+    if cases:
+        case_descs = []
+        for c in cases:
+            facet = c.get("facet", "scenario")
+            usage = c.get("usage", "")
+            case_descs.append(f"{c.get('case_id', '')}（切面: {facet}，用法: {usage}）")
+        parts.append(f"- 本章案例/场景：{'；'.join(case_descs)}")
+
+    misconceptions = routing.get("misconceptions", [])
+    if misconceptions:
+        mis_labels = [m.get("label", str(m)) if isinstance(m, dict) else str(m) for m in misconceptions]
+        parts.append(f"- 本章学员常见误区：{'；'.join(mis_labels)}")
+
+    red_lines = routing.get("red_lines", [])
+    if red_lines:
+        rl_labels = [r.get("label", str(r)) if isinstance(r, dict) else str(r) for r in red_lines]
+        parts.append(f"- 本章红线：{'；'.join(rl_labels)}")
+
+    if parts:
+        return "## 本章教师经验校准数据\n" + "\n".join(parts)
+    return "（本章无教师经验校准数据）"
+
+
 def _build_prerequisite_map(cluster_chapters: list[dict]) -> dict[int, list[str]]:
     """根据章节顺序和聚类内容，构建简单的前置知识映射。
     每章的前置知识 = 前面所有章节中出现过的核心知识点名称（最多 5 个）。
@@ -3782,6 +3819,37 @@ async def _regenerate_all_chapters_async(blueprint_id: str) -> None:
     from apps.api.core.llm_gateway import get_llm_gateway
     SF = _make_session()
 
+    # ★ v2.2: 加载 Course Map + 经验校准，用于章节重建时注入校准数据
+    course_map_chapters = []
+    calibration_routing_map: dict[str, dict] = {}  # chapter_order → routing
+    confidence_score = 0.0
+    extra_notes = ""
+
+    async with SF() as session:
+        bp_row = await session.execute(
+            text("""SELECT course_map::text, calibration_routing::text,
+                            calibration_confidence_score, extra_notes
+                     FROM skill_blueprints WHERE blueprint_id=CAST(:bid AS uuid)"""),
+            {"bid": blueprint_id}
+        )
+        bp = bp_row.fetchone()
+        if bp:
+            if bp[0]:
+                cm = json.loads(bp[0])
+                course_map_chapters = cm.get("chapters", [])
+            if bp[1]:
+                # calibration_routing 也可能存储了路由数据
+                pass
+            confidence_score = float(bp[2] or 0.0)
+            extra_notes = bp[3] or ""
+
+    # 构建 chapter_order → calibration_routing 映射（从 Course Map）
+    for cm_ch in course_map_chapters:
+        order = cm_ch.get("order")
+        if order is not None:
+            routing = cm_ch.get("calibration_routing", {})
+            calibration_routing_map[order] = routing
+
     # 查所有 stage → chapter
     async with SF() as session:
         stages_result = await session.execute(
@@ -3793,7 +3861,12 @@ async def _regenerate_all_chapters_async(blueprint_id: str) -> None:
         chapters = []
         for sid in stage_ids:
             ch_result = await session.execute(
-                text("SELECT chapter_id::text, title, objective, task_description FROM skill_chapters WHERE stage_id=CAST(:sid AS uuid) ORDER BY chapter_order"),
+                text("""SELECT sc.chapter_id::text, sc.title, sc.objective,
+                               sc.task_description, sc.chapter_order,
+                               COALESCE(sc.teaching_template_used, 'skill_acquisition') AS tpl_used
+                        FROM skill_chapters sc
+                        WHERE sc.stage_id=CAST(:sid AS uuid)
+                        ORDER BY sc.chapter_order"""),
                 {"sid": sid}
             )
             chapters.extend([dict(r._mapping) for r in ch_result.fetchall()])
@@ -3809,23 +3882,66 @@ async def _regenerate_all_chapters_async(blueprint_id: str) -> None:
         if bp and bp.teacher_instruction:
             global_instruction = bp.teacher_instruction
 
-    logger.info("[regen_all] chapters to process", total=len(chapters), blueprint_id=blueprint_id)
+    logger.info("[regen_all] chapters to process", total=len(chapters),
+                blueprint_id=blueprint_id,
+                calibration_routed=len(calibration_routing_map))
+
     llm = get_llm_gateway()
 
     instruction_block = TEACHER_INSTRUCTION_PREFIX.format(
         instruction=global_instruction or ""
     )
 
+    # 课型映射
+    template_to_type = {
+        "concept_construction": "theory",
+        "skill_acquisition": "task",
+        "problem_solving": "project",
+        "compliance_internalization": "compliance",
+    }
+
     for idx, ch in enumerate(chapters, start=1):
         chapter_id = ch["chapter_id"]
         try:
+            chapter_order = ch.get("chapter_order", idx)
+            # 从 teaching_template_used 反推课型
+            chapter_type = template_to_type.get(
+                ch.get("tpl_used", ""), "task"
+            )
+
+            # ★ v2.2: 获取本章校准数据
+            routing = calibration_routing_map.get(chapter_order, {})
+            chapter_cal_text = _build_chapter_calibration_text(routing)
+
+            # 加载本章关联实体
+            async with SF() as session:
+                ent_rows = await session.execute(
+                    text("""SELECT ke.canonical_name, ke.short_definition
+                             FROM knowledge_entities ke
+                             JOIN entity_chapter_links ecl ON ke.entity_id = ecl.entity_id
+                             WHERE ecl.chapter_id = CAST(:cid AS uuid)
+                             LIMIT 20"""),
+                    {"cid": chapter_id}
+                )
+                entities = [dict(r._mapping) for r in ent_rows.fetchall()]
+
+            entity_def_lines = []
+            for e in entities:
+                name = e.get("canonical_name", "")
+                definition = (e.get("short_definition") or "")[:120]
+                if name:
+                    entity_def_lines.append(f"  - {name}：{definition}")
+            entities_with_defs = "\n".join(entity_def_lines) if entity_def_lines else "（无）"
+
             prompt = _build_chapter_prompt(
                 chapter_title=ch["title"] or "",
-                objective=ch["objective"] or "",
-                task_description=ch["task_description"] or "",
-                chapter_type=ch.get("chapter_type", "task"),
-                entities_with_definitions=ch.get("entity_names", ""),
-                extra_notes=instruction_block if instruction_block else "",
+                objective=ch.get("objective") or "",
+                task_description=ch.get("task_description") or "",
+                chapter_type=chapter_type,
+                entities_with_definitions=entities_with_defs,
+                extra_notes=instruction_block if instruction_block else (extra_notes or ""),
+                chapter_calibration=chapter_cal_text,
+                confidence_score=confidence_score,
             )
             content = await asyncio.wait_for(
                 llm.generate(prompt, model_route="tutorial_content"),

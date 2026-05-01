@@ -7,7 +7,7 @@ from apps.api.modules.auth.router import get_current_user
 from apps.api.modules.skill_blueprint.schema import (
     GenerateBlueprintRequest, StartGenerationRequest,
     CalibrationQuestionRequest, CalibrationAnswers,
-    CourseMapRegenerateRequest,
+    CourseMapRegenerateRequest, SubmitCalibrationRequest,
 )
 from apps.api.modules.skill_blueprint.service import BlueprintService
 
@@ -367,3 +367,100 @@ async def regenerate_course_map(topic_key: str, req: CourseMapRegenerateRequest,
         "reason": req.reason,
         "marked_chapters": req.marked_chapters,
     }}
+
+
+@router.post("/{topic_key}/submit-calibration")
+async def submit_calibration(topic_key: str, req: SubmitCalibrationRequest,
+                              db: AsyncSession = Depends(get_db),
+                              current_user: dict = Depends(get_current_user)):
+    """★v2.2: 已有课程补答经验校准，答完可选立即触发全课程重建。"""
+    import json
+    from sqlalchemy import text as _sc_text
+    from apps.api.modules.skill_blueprint.repository import BlueprintRepository
+
+    repo = BlueprintRepository(db)
+    space_id = req.space_id
+
+    # 检查 blueprint 是否存在
+    existing = await repo.get_by_topic(topic_key)
+    if not existing:
+        raise HTTPException(404, detail={"code": "BP_001",
+                                          "msg": f"topic '{topic_key}' 暂无蓝图"})
+
+    answers = req.answers
+
+    # 计算 confidence_score
+    answered_count = sum(
+        1 for v in answers.values()
+        if v and v != "不清楚" and v != "skip" and v != []
+    )
+    total_questions = max(5, len(answers))
+    confidence_score = min(1.0, answered_count / total_questions)
+
+    # 构建 experience_calibration JSONB（与 start-generation 逻辑一致）
+    calibration_data = {
+        "confidence_score": confidence_score,
+        "confidence_details": {
+            "questions_answered": answered_count,
+            "questions_skipped": total_questions - answered_count,
+            "calibration_source": "retroactive",  # 标记为补答
+        },
+        "real_pain_points": [
+            {"label": opt.get("label", ""), "entity_id": opt.get("entity_id", "")}
+            for opt in answers.get("q1_pain_points", [])
+        ] if isinstance(answers.get("q1_pain_points"), list) else [],
+        "selected_cases": [
+            {"id": opt.get("id", ""), "label": opt.get("label", ""),
+             "source": "teacher_selected" if not opt.get("let_me_say") else "teacher_provided"}
+            for opt in (answers.get("q2_cases", []) if isinstance(answers.get("q2_cases"), list) else [answers.get("q2_cases", {})])
+        ] if answers.get("q2_cases") else [],
+        "real_misconceptions": [
+            {"label": opt.get("label", ""), "entity_id": opt.get("entity_id", "")}
+            for opt in answers.get("q3_misconceptions", [])
+        ] if isinstance(answers.get("q3_misconceptions"), list) else [],
+        "priority_ranking": answers.get("q4_priority", []) if isinstance(answers.get("q4_priority"), list) else [],
+        "red_lines": [
+            {"label": opt.get("label", ""), "entity_id": opt.get("entity_id", "")}
+            for opt in answers.get("q5_red_lines", [])
+        ] if isinstance(answers.get("q5_red_lines"), list) else [],
+    }
+
+    await db.execute(
+        _sc_text("""UPDATE skill_blueprints
+                    SET experience_calibration = CAST(:cal AS jsonb),
+                        calibration_confidence_score = :score
+                    WHERE topic_key = :tk AND space_id = CAST(:sid AS uuid)"""),
+        {
+            "cal": json.dumps(calibration_data, ensure_ascii=False),
+            "score": confidence_score,
+            "tk": topic_key,
+            "sid": space_id,
+        }
+    )
+    await db.commit()
+
+    logger.info("[v2.2] Retroactive calibration saved",
+               topic_key=topic_key, answered=answered_count,
+               confidence_score=confidence_score)
+
+    result = {
+        "message": "经验校准数据已保存",
+        "topic_key": topic_key,
+        "confidence_score": confidence_score,
+        "questions_answered": answered_count,
+    }
+
+    # 如果请求立即重建，触发生成任务
+    if req.regenerate:
+        from apps.api.tasks.blueprint_tasks import synthesize_blueprint
+        extra_notes = existing.get("extra_notes") or ""
+        task = synthesize_blueprint.apply_async(
+            args=[topic_key, space_id, extra_notes, None],
+            queue="knowledge"
+        )
+        result["regenerate_triggered"] = True
+        result["task_id"] = task.id
+        logger.info("[v2.2] Regeneration triggered after calibration",
+                   topic_key=topic_key, task_id=task.id)
+
+    return {"code": 200, "data": result}

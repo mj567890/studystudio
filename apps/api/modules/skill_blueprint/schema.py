@@ -82,3 +82,9 @@ class CalibrationQuestionRequest(BaseModel):
 class CourseMapRegenerateRequest(BaseModel):
     reason: str  # "order" | "granularity" | "priority" | "mark_mode" | "not_sure"
     marked_chapters: Optional[dict] = None  # mark_mode 时使用
+
+class SubmitCalibrationRequest(BaseModel):
+    """补答经验校准 — 已有课程补充校准数据"""
+    space_id: str
+    answers: dict  # {q1_pain_points: [...], q2_cases: {...}, ...}
+    regenerate: bool = False  # 是否答完立即重建
