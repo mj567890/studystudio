@@ -21,14 +21,14 @@
 
 ### C-1：真实 API Key 硬编码在 .env 中
 - **文件：** `.env:40`
-- **描述：** `OPENAI_API_KEY=sk-ef4393f59b9145b58757a6a42d8fc59f` 是真实可用的 DeepSeek API 密钥，已提交到版本控制或可能泄露
+- **描述：** `OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` 是真实可用的 DeepSeek API 密钥（已在发现后立即轮换），此处脱敏展示
 - **影响：** 攻击者获取后可无限调用 LLM API，产生巨额费用
 - **修复：** 立即轮换密钥 → 替换为占位符 `sk-YOUR-API-KEY-HERE`
 - **原则：** `.env` 已在 `.gitignore`，但此文件曾存在于工作目录中
 
 ### C-2：AI 配置加密密钥泄露
 - **文件：** `.env:66`
-- **描述：** `AI_CONFIG_ENCRYPTION_KEY=REDACTED-CHANGE-ME-xxxxxxxxxxxxxxxxxxxxxxxxxxxx=` 是用于加解密所有 AI Provider API Key 的主密钥
+- **描述：** `AI_CONFIG_ENCRYPTION_KEY=REDACTED-CHANGE-ME-xxxxxxxxxxxxxxxxxxxxxxxxxxxx` 是用于加解密所有 AI Provider API Key 的主密钥（已在发现后立即轮换），此处脱敏展示
 - **影响：** 泄露后所有已加密的 provider key 皆可被解密
 - **修复：** 替换为 `!CHANGE-ME-gen-with-python -c "import base64,os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())"`
 

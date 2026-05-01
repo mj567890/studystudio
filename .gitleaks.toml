@@ -1,0 +1,33 @@
+# StudyStudio — Gitleaks 白名单配置
+# 生成日期：2026-05-02
+# 版本：gitleaks v8
+
+[allowlist]
+  description = "StudyStudio 全局白名单"
+
+  # ── 路径排除 ──
+  paths = [
+    # API 契约文件 — JWT header 占位符（eyJ... 截断以 ... 结尾）
+    '''contracts/.*\.yaml''',
+    '''devdocs/archive/.*\.yaml''',
+    # 安装脚本 — YOUR_ADMIN_TOKEN 占位符
+    '''install_phase1\.sh''',
+  ]
+
+  # ── 正则排除（匹配行内容） ──
+  regexes = [
+    # 截断的 JWT 占位符：标准 JWT header {"alg":"HS256","typ":"JWT"}
+    # base64 = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9 + "..." 截断
+    '''eyJ[A-Za-z0-9_-]{30,}\.\.\."''',
+    # 安装文档占位符
+    '''Bearer YOUR_ADMIN_TOKEN''',
+  ]
+
+  # ── 关键词排除 ──
+  stopwords = [
+    "YOUR_ADMIN_TOKEN",
+    "YOUR-API-KEY-HERE",
+    "CHANGE-ME",
+    "change-me-in-production",
+    "dev-secret-key-CHANGE-IN-PRODUCTION",
+  ]
