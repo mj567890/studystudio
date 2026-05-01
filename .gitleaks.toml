@@ -30,4 +30,6 @@
     "CHANGE-ME",
     "change-me-in-production",
     "dev-secret-key-CHANGE-IN-PRODUCTION",
+    "REDACTED",
+    "sk-REDACTED",
   ]
