@@ -7,8 +7,6 @@ Block A：认证路由与依赖注入
   - 所有端点使用参数化查询
 """
 from uuid import UUID
-import time
-from collections import defaultdict
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, status, UploadFile
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -27,73 +25,8 @@ router = APIRouter(prefix="/api", tags=["auth"])
 security = HTTPBearer()
 
 
-# ── 速率限制器（内存版，单进程有效；多 worker 部署建议升级为 Redis 版） ──
-class RateLimiter:
-    """基于滑动窗口的 IP 速率限制"""
-
-    def __init__(self, max_requests: int, window_seconds: int = 60):
-        self.max_requests = max_requests
-        self.window_seconds = window_seconds
-        self._store: dict[str, list[float]] = defaultdict(list)
-
-    def _cleanup(self, key: str, now: float) -> None:
-        cutoff = now - self.window_seconds
-        self._store[key] = [t for t in self._store[key] if t > cutoff]
-        if not self._store[key]:
-            del self._store[key]
-
-    def is_allowed(self, key: str) -> bool:
-        now = time.time()
-        self._cleanup(key, now)
-        if len(self._store.get(key, [])) >= self.max_requests:
-            return False
-        self._store[key].append(now)
-        return True
-
-    def reset_after(self, key: str) -> float:
-        now = time.time()
-        self._cleanup(key, now)
-        if key not in self._store:
-            return 0.0
-        oldest = min(self._store[key])
-        return max(0.0, oldest + self.window_seconds - now)
-
-
-_login_limiter = RateLimiter(max_requests=20, window_seconds=60)    # 20 login/min
-_register_limiter = RateLimiter(max_requests=5, window_seconds=60)  # 5 register/min
-
-
-def _get_client_ip(request: Request) -> str:
-    """获取客户端真实 IP（考虑反向代理）"""
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    real_ip = request.headers.get("X-Real-IP")
-    if real_ip:
-        return real_ip.strip()
-    return request.client.host if request.client else "unknown"
-
-
-async def rate_limit_login(request: Request) -> None:
-    ip = _get_client_ip(request)
-    if not _login_limiter.is_allowed(f"login:{ip}"):
-        retry_after = int(_login_limiter.reset_after(f"login:{ip}")) + 1
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail={"code": "RATE_001", "msg": f"登录请求过于频繁，请 {retry_after} 秒后重试"},
-            headers={"Retry-After": str(retry_after)},
-        )
-
-
-async def rate_limit_register(request: Request) -> None:
-    ip = _get_client_ip(request)
-    if not _register_limiter.is_allowed(f"register:{ip}"):
-        retry_after = int(_register_limiter.reset_after(f"register:{ip}")) + 1
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail={"code": "RATE_002", "msg": f"注册请求过于频繁，请 {retry_after} 秒后重试"},
-            headers={"Retry-After": str(retry_after)},
-        )
+# ── 速率限制器（从共享模块导入，内存版滑动窗口） ──
+from apps.api.core.rate_limit import RateLimiter, rate_limit_login, rate_limit_register  # noqa: F401 — RateLimiter 向后兼容
 
 
 def _check_password_strength(v: str) -> str:

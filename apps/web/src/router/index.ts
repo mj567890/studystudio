@@ -39,6 +39,7 @@ const router = createRouter({
         { path: 'quiz',     component: () => import('@/views/learner/QuizView.vue') },
         { path: 'gaps',     component: () => import('@/views/learner/GapsView.vue') },
         { path: 'path',     component: () => import('@/views/learner/RepairPathView.vue') },
+        { path: 'design',   component: () => import('@/views/learner/CourseDesignView.vue') },
         { path: 'tutorial', component: () => import('@/views/tutorial/TutorialView.vue') },
         { path: 'chat',     component: () => import('@/views/tutorial/ChatView.vue') },
         { path: 'upload',   component: () => import('@/views/learner/UploadView.vue') },

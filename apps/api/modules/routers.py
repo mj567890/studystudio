@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.api.core.db import get_db
 from apps.api.modules.auth.router import get_current_user
+from apps.api.core.rate_limit import rate_limit_llm_standard
 from apps.api.modules.learner.learner_service import (
     ColdStartService,
     GapScanService,
@@ -60,6 +61,7 @@ async def get_placement_quiz(
     topic_key: str,
     current_user: dict = Depends(get_current_user),
     db: AsyncSession   = Depends(get_db),
+    _rate: None        = Depends(rate_limit_llm_standard),
 ) -> dict:
     svc  = ColdStartService(db)
     quiz = await svc.get_placement_quiz(topic_key)
@@ -394,6 +396,7 @@ async def chat(
     background_tasks: BackgroundTasks,
     current_user: dict     = Depends(get_current_user),
     db: AsyncSession       = Depends(get_db),
+    _rate: None            = Depends(rate_limit_llm_standard),
 ) -> dict:
     """
     D3+R1（V2.6）：chat_and_prepare 返回三元组，
@@ -761,6 +764,63 @@ async def get_chapter_source(
     return {"code": 200, "msg": "success", "data": {"pages": result_pages}}
 
 
+@teaching_router.get("/chapters/{chapter_id}/diagrams")
+async def get_chapter_diagrams(
+    chapter_id:   str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession   = Depends(get_db),
+) -> dict:
+    """返回章节关联的渲染图表（media_assets 表 → MinIO presigned URLs）。"""
+    import os as _os
+    from sqlalchemy import text as _text
+
+    # 1. 查询 media_assets
+    rows = await db.execute(
+        _text("""
+            SELECT asset_id::text,
+                   storage_key,
+                   content_type,
+                   provider_kind,
+                   width,
+                   height,
+                   sort_order
+            FROM media_assets
+            WHERE chapter_id = CAST(:cid AS uuid)
+              AND storage_key IS NOT NULL
+            ORDER BY sort_order
+        """),
+        {"cid": chapter_id}
+    )
+
+    assets = rows.fetchall()
+    if not assets:
+        return {"code": 200, "msg": "success", "data": {"diagrams": []}}
+
+    # 2. 生成 presigned URLs
+    from apps.api.core.storage import get_minio_client
+    minio = get_minio_client()
+    public_endpoint = _os.environ.get("MINIO_PUBLIC_ENDPOINT", "http://localhost:9000")
+
+    diagrams = []
+    for r in assets:
+        try:
+            url = await minio.presign(r.storage_key, expires=3600)
+            url = url.replace("http://minio:9000", public_endpoint)
+        except Exception:
+            url = ""
+        diagrams.append({
+            "asset_id":      r.asset_id,
+            "url":           url,
+            "content_type":  r.content_type,
+            "provider_kind": r.provider_kind,
+            "width":         r.width,
+            "height":        r.height,
+            "sort_order":    r.sort_order,
+        })
+
+    return {"code": 200, "msg": "success", "data": {"diagrams": diagrams}}
+
+
 @teaching_router.delete("/conversations/{conversation_id}")
 async def delete_conversation(
     conversation_id: str,
@@ -846,6 +906,7 @@ async def get_chapter_quiz(
     chapter_id:   str,
     current_user: dict = Depends(get_current_user),
     db: AsyncSession   = Depends(get_db),
+    _rate: None        = Depends(rate_limit_llm_standard),
 ) -> dict:
     """获取章节测验题目，已生成则直接返回，否则即时生成并保存。"""
     from sqlalchemy import text as _text

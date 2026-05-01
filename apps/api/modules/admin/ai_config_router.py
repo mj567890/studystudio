@@ -28,6 +28,7 @@ from apps.api.core.db import get_db
 from apps.api.core.crypto import encrypt, decrypt, mask_secret
 from apps.api.core.llm_gateway import get_llm_gateway
 from apps.api.modules.auth.router import get_current_user
+from apps.api.core.rate_limit import rate_limit_celery
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/api/admin/ai", tags=["admin-ai-config"])
@@ -59,6 +60,8 @@ KNOWN_CAPABILITIES = [
     {"key": "tts",                   "group": "audio",  "kind": "chat",      "label": "语音合成",            "required": False},
     # ── 生成（未来）──
     {"key": "image_generation",      "group": "image",  "kind": "chat",      "label": "图像生成",            "required": False},
+    # ── 图表（Media Gateway）──
+    {"key": "diagram_generation",    "group": "image",  "kind": "chat",      "label": "图表渲染（Mermaid/Kroki）", "required": False},
     # ── 安全（未来）──
     {"key": "moderation",            "group": "safety", "kind": "chat",      "label": "内容审核",            "required": False},
 ]
@@ -71,7 +74,7 @@ CAPABILITY_KEYS = {c["key"] for c in KNOWN_CAPABILITIES}
 # ═══════════════════════════════════════════════════════════════════
 class ProviderCreate(BaseModel):
     name: str = Field(..., max_length=100)
-    kind: str = Field(..., pattern="^(openai_compatible|anthropic|gemini|ollama|azure_openai)$")
+    kind: str = Field(..., pattern="^(openai_compatible|anthropic|gemini|ollama|azure_openai|image_api|image_local)$")
     base_url: str
     api_key: str = ""         # 前端传明文，服务端加密入库
     extra_config: dict = {}
@@ -106,7 +109,7 @@ class TestProviderRequest(BaseModel):
     base_url: str | None = None
     api_key: str | None = None
     model_name: str
-    capability_kind: str = Field(..., pattern="^(chat|embedding|reranker)$")
+    capability_kind: str = Field(..., pattern="^(chat|embedding|reranker|image_generation|diagram_generation)$")
 
 
 class BackfillEmbeddingsRequest(BaseModel):
@@ -559,6 +562,35 @@ async def test_provider(
                 ),
                 "capability_kind": "reranker",
             }
+        elif req.capability_kind in ("diagram_generation", "image_generation"):
+            # 图表/图片生成：Kroki → GET /health，DALL-E → 连通性检查
+            import httpx as _httpx2
+            base = base_url.rstrip("/")
+            t_health = _time.monotonic()
+            async with _httpx2.AsyncClient(timeout=15.0) as hc:
+                try:
+                    hr = await hc.get(f"{base}/health")
+                    hr.raise_for_status()
+                    latency = int((_time.monotonic() - t_health) * 1000)
+                    result = {
+                        "ok": True,
+                        "latency_ms": latency,
+                        "sample": f"Provider {req.capability_kind} 健康检查通过 ({base})",
+                        "capability_kind": req.capability_kind,
+                    }
+                except Exception:
+                    # /health 不可用，尝试基础连通性
+                    try:
+                        hr = await hc.get(base, timeout=10.0)
+                        latency = int((_time.monotonic() - t_health) * 1000)
+                        result = {
+                            "ok": True,
+                            "latency_ms": latency,
+                            "sample": f"Provider {req.capability_kind} 基础连通性正常 ({base})",
+                            "capability_kind": req.capability_kind,
+                        }
+                    except Exception as exc2:
+                        raise RuntimeError(f"Provider 不可达 ({base}): {exc2}") from exc2
         else:  # embedding
             resp = await _test_embedding_raw(base_url, api_key, req.model_name)
             latency = resp["latency_ms"]
@@ -634,6 +666,7 @@ async def test_provider(
 async def trigger_backfill_embeddings(
     req: BackfillEmbeddingsRequest,
     current_user: dict = Depends(get_current_user),
+    _rate: None = Depends(rate_limit_celery),
 ):
     """
     手动触发批量 embedding 回填。

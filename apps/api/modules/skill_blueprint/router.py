@@ -10,6 +10,7 @@ from apps.api.modules.skill_blueprint.schema import (
     CourseMapRegenerateRequest, SubmitCalibrationRequest,
 )
 from apps.api.modules.skill_blueprint.service import BlueprintService
+from apps.api.core.rate_limit import rate_limit_llm_heavy
 
 router = APIRouter(prefix="/api/blueprints", tags=["skill_blueprint"])
 logger = structlog.get_logger()
@@ -130,7 +131,8 @@ async def generate_proposals(topic_key: str, db: AsyncSession = Depends(get_db),
 @router.post("/{topic_key}/start-generation")
 async def start_generation(topic_key: str, req: StartGenerationRequest,
                             db: AsyncSession = Depends(get_db),
-                            current_user: dict = Depends(get_current_user)):
+                            current_user: dict = Depends(get_current_user),
+                            _rate: None = Depends(rate_limit_llm_heavy)):
     """教师选择课程方案 + 填空调整后，保存配置并启动课程生成。"""
     import json
     from apps.api.tasks.blueprint_tasks import synthesize_blueprint
@@ -139,6 +141,10 @@ async def start_generation(topic_key: str, req: StartGenerationRequest,
 
     repo = BlueprintRepository(db)
     space_id = req.space_id
+
+    # ★ P1-01 修复：校验 space 访问权限（与其他端点一致）
+    from apps.api.modules.space.service import SpaceService
+    await SpaceService(db).require_space_access(space_id, current_user["user_id"])
 
     # 从 knowledge_spaces 读取对应方案
     row = await db.execute(
@@ -372,7 +378,8 @@ async def regenerate_course_map(topic_key: str, req: CourseMapRegenerateRequest,
 @router.post("/{topic_key}/submit-calibration")
 async def submit_calibration(topic_key: str, req: SubmitCalibrationRequest,
                               db: AsyncSession = Depends(get_db),
-                              current_user: dict = Depends(get_current_user)):
+                              current_user: dict = Depends(get_current_user),
+                              _rate: None = Depends(rate_limit_llm_heavy)):
     """★v2.2: 已有课程补答经验校准，答完可选立即触发全课程重建。"""
     import json
     from sqlalchemy import text as _sc_text
@@ -386,6 +393,15 @@ async def submit_calibration(topic_key: str, req: SubmitCalibrationRequest,
     if not existing:
         raise HTTPException(404, detail={"code": "BP_001",
                                           "msg": f"topic '{topic_key}' 暂无蓝图"})
+
+    # 检查空间访问权限
+    bp_space_id = existing.get("space_id")
+    if bp_space_id:
+        from apps.api.modules.space.service import SpaceService, SpaceError
+        try:
+            await SpaceService(db).require_space_access(bp_space_id, current_user["user_id"])
+        except SpaceError as e:
+            raise HTTPException(403, detail={"code": e.code, "msg": e.msg})
 
     answers = req.answers
 

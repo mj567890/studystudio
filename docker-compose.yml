@@ -220,6 +220,28 @@ services:
     command: server /data --console-address ":9001"
     volumes: [minio_data:/data]
 
+  # ── 图表渲染 (Media Gateway Tier 1) ───────────────────────────
+  kroki:
+    image: yuzutech/kroki:latest
+    restart: unless-stopped
+    ports:
+      - "${KROKI_PORT:-8100}:8000"
+    environment:
+      - KROKI_MERMAID_HOST=mermaid
+    depends_on:
+      - mermaid
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  mermaid:
+    image: yuzutech/kroki-mermaid:latest
+    restart: unless-stopped
+    expose:
+      - "8002"
+
 volumes:
   postgres_data:
   redis_data:

@@ -65,6 +65,13 @@ class NormalizationSettings(BaseSettings):
     edit_distance_max:     int   = 3
 
 
+class MediaSettings(BaseSettings):
+    """图表/图片生成网关配置 — Media Gateway"""
+    kroki_endpoint:       str   = Field(default="http://kroki:8000", alias="KROKI_ENDPOINT")
+    kroki_timeout:        float = Field(default=30.0, alias="KROKI_TIMEOUT")
+    diagram_cache_enabled: bool = Field(default=True, alias="DIAGRAM_CACHE_ENABLED")
+
+
 class TutorialSettings(BaseSettings):
     coherence_embedding_threshold: float = 0.4   # 初始保守值，需根据真实数据校准
     prerequisite_ref_rate_min:     float = 0.3
@@ -100,6 +107,7 @@ class Settings(BaseSettings):
     jwt:           JWTSettings           = JWTSettings()
     normalization: NormalizationSettings = NormalizationSettings()
     tutorial:      TutorialSettings      = TutorialSettings()
+    media:         MediaSettings         = MediaSettings()
 
 
 @lru_cache

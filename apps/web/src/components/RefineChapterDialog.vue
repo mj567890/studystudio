@@ -46,7 +46,7 @@
         v-model="instruction"
         type="textarea"
         :rows="10"
-        placeholder="输入修改指令，AI 将按你的要求重写本章。&#10;&#10;例如：&quot;增加实操案例，弱化理论推导&quot;、&quot;加入航空维修安全规范&quot;、&quot;难度下调，适配中职基础&quot;"
+        placeholder="输入自然语言指令，AI 将按你的要求重写本章。&#10;&#10;例如：&quot;去掉第一段，改成流程图&quot;、&quot;补充系统架构图&quot;、&quot;增加实操案例，弱化理论推导&quot;、&quot;难度下调，适配中职基础&quot;"
       />
       <!-- 快捷指令 -->
       <div class="refine-presets">
@@ -130,6 +130,7 @@ const templates = ref<any[]>([])
 const selectedTemplateId = ref<string | null>(null)
 
 const presets = [
+  '增加架构图/流程图',
   '增加实操案例',
   '强化理论知识',
   '降低难度',

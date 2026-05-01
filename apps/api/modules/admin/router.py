@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.api.core.db import get_db
 from apps.api.modules.auth.router import get_current_user, require_role
+from apps.api.core.rate_limit import rate_limit_celery
 
 logger = structlog.get_logger(__name__)
 
@@ -64,6 +65,39 @@ async def _get_space_id_from_blueprint(db: AsyncSession, blueprint_id: str) -> s
     )
     r = row.fetchone()
     return r[0] if r else None
+
+
+async def _load_blueprint_context(db: AsyncSession, blueprint_id: str) -> dict:
+    """从数据库异步读取课程设计上下文（用于 regenerate/refine 端点）。"""
+    import json as _json
+    context = {
+        "course_title": "",
+        "target_audience_label": "学习者",
+        "target_audience_level": "beginner",
+        "teaching_style_label": "系统教学",
+        "teaching_style_approach": "",
+        "chapter_type": "task",
+    }
+    try:
+        row = await db.execute(
+            text("""SELECT selected_proposal::text, proposal_adjustments::text, extra_notes, title
+                    FROM skill_blueprints
+                    WHERE blueprint_id = CAST(:bid AS uuid)"""),
+            {"bid": blueprint_id}
+        )
+        bp = row.fetchone()
+        if bp:
+            if bp[0]:
+                proposal = _json.loads(bp[0])
+                context["target_audience_label"] = proposal.get("target_audience", {}).get("label", context["target_audience_label"])
+                context["target_audience_level"] = proposal.get("target_audience", {}).get("level", context["target_audience_level"])
+                context["teaching_style_label"] = proposal.get("teaching_style", {}).get("label", context["teaching_style_label"])
+                context["teaching_style_approach"] = proposal.get("teaching_style", {}).get("approach", "")
+            if bp[3]:
+                context["course_title"] = bp[3]
+    except Exception:
+        pass
+    return context
 
 
 
@@ -1049,6 +1083,7 @@ async def get_auto_review_status(
 async def trigger_auto_review(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(require_role("admin", "knowledge_reviewer")),
+    _rate: None = Depends(rate_limit_celery),
 ) -> dict:
     """触发对所有 global 领域的 AI 自动审核任务。"""
     result = await db.execute(
@@ -1277,13 +1312,21 @@ async def get_chapter_detail(
     }
 
 
+class RegenerateChapterRequest(BaseModel):
+    teacher_instruction: str = ""  # 可选，传入模板内容覆盖默认 prompt 约束
+
+
 @router.post("/admin/courses/chapters/{chapter_id}/regenerate")
 async def regenerate_chapter(
     chapter_id: str,
+    req: RegenerateChapterRequest | None = None,
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ) -> dict:
-    """单章内容重生成（同步执行，约 30-150s）。需要空间所有者权限。"""
+    """单章内容重生成（同步执行，约 30-150s）。需要空间所有者权限。
+
+    可选传入 teacher_instruction（模板内容），覆盖 prompt 中的教学约束。
+    """
     from apps.api.modules.space.service import SpaceService, SpaceError
     space_id = await _get_space_id_from_chapter(db, chapter_id)
     if not space_id:
@@ -1294,7 +1337,7 @@ async def regenerate_chapter(
         raise HTTPException(403, detail={"code": e.code, "msg": e.msg})
     from sqlalchemy.exc import ProgrammingError
     from apps.api.modules.skill_blueprint.repository import BlueprintRepository
-    from apps.api.tasks.blueprint_tasks import CHAPTER_CONTENT_PROMPT, _normalize_chapter_content
+    from apps.api.tasks.blueprint_tasks import _build_chapter_prompt, _normalize_chapter_content, TEACHER_INSTRUCTION_PREFIX
     from apps.api.core.llm_gateway import get_llm_gateway
     import apps.api.core.llm_gateway as _gw_mod
 
@@ -1308,19 +1351,96 @@ async def regenerate_chapter(
     if not row:
         return {"code": 404, "msg": "章节不存在", "data": {}}
 
+    # 构建 teacher_instruction：传入的模板内容优先，用 PREFIX 包裹
+    ti = (req.teacher_instruction or "").strip() if req else ""
+    teacher_instruction = TEACHER_INSTRUCTION_PREFIX.format(instruction=ti) if ti else ""
+
     _gw_mod._llm_gateway = None
     llm = get_llm_gateway()
-    prompt = CHAPTER_CONTENT_PROMPT.format(
+
+    # 读取章节对应的蓝图上下文
+    bp_ctx = await _load_blueprint_context(db, row.blueprint_id)
+
+    prompt = _build_chapter_prompt(
         chapter_title=row.title or "",
         objective=row.objective or "",
         task_description=row.task_description or "",
+        chapter_type=bp_ctx.get("chapter_type", "task"),
+        extra_notes=teacher_instruction,
+        course_title=bp_ctx.get("course_title", ""),
+        target_audience_label=bp_ctx.get("target_audience_label", "学习者"),
+        target_audience_level=bp_ctx.get("target_audience_level", "beginner"),
+        teaching_style_label=bp_ctx.get("teaching_style_label", "系统教学"),
+        teaching_style_approach=bp_ctx.get("teaching_style_approach", ""),
     )
     content = await asyncio.wait_for(
         llm.generate(prompt, model_route="tutorial_content"),
         timeout=150
     )
+    # 提取图表 → 剥离 → 保存内容
+    from apps.api.tasks.blueprint_tasks import _extract_diagrams_from_raw, validate_chapter_content
+    diagrams = _extract_diagrams_from_raw(content)
+    normalized = _normalize_chapter_content(content.strip())
     repo = BlueprintRepository(db)
-    await repo.update_chapter_content(chapter_id, _normalize_chapter_content(content.strip()))
+    await repo.update_chapter_content(chapter_id, normalized)
+
+    # 自动化质量检查
+    try:
+        qr = validate_chapter_content(normalized, [])
+        template_name = {"theory": "concept_construction", "task": "skill_acquisition", "project": "problem_solving"}.get(
+            bp_ctx.get("chapter_type", "task"), "skill_acquisition"
+        )
+        await db.execute(
+            text("""UPDATE skill_chapters
+                    SET teaching_template_used = :tpl,
+                        auto_check_issues = CAST(:issues AS jsonb),
+                        auto_check_passed = :passed
+                    WHERE chapter_id = CAST(:cid AS uuid)"""),
+            {
+                "tpl": template_name,
+                "issues": json.dumps(qr.get("issues", []), ensure_ascii=False),
+                "passed": qr.get("passed", False),
+                "cid": chapter_id,
+            }
+        )
+    except Exception:
+        pass
+
+    # 渲染图表管道
+    if diagrams:
+        try:
+            from apps.api.core.media_gateway import get_media_gateway
+            mgw = get_media_gateway()
+            await db.execute(
+                text("DELETE FROM media_assets WHERE chapter_id=CAST(:cid AS uuid)"),
+                {"cid": chapter_id}
+            )
+            for di, d in enumerate(diagrams):
+                result = await mgw.render_diagram(
+                    chapter_id, d["code"], d.get("type", "mermaid")
+                )
+                if result:
+                    await db.execute(
+                        text("""
+                            INSERT INTO media_assets
+                                (chapter_id, diagram_spec, storage_key,
+                                 content_type, provider_kind, sort_order)
+                            VALUES
+                                (CAST(:cid AS uuid), :spec, :key,
+                                 :ctype, :pkind, :sort)
+                        """),
+                        {
+                            "cid": chapter_id,
+                            "spec": d["code"],
+                            "key": result.storage_key,
+                            "ctype": result.content_type,
+                            "pkind": result.provider_kind,
+                            "sort": di,
+                        }
+                    )
+        except Exception as e:
+            logger.warning("Diagram rendering failed in regenerate",
+                          chapter_id=chapter_id, error=str(e))
     await db.commit()
     return {"code": 200, "data": {"chapter_id": chapter_id, "regenerated": True}}
 
@@ -1441,9 +1561,12 @@ async def refine_chapter(
     except asyncio.TimeoutError:
         raise HTTPException(504, detail={"msg": "精调超时，请重试或缩短指令"})
 
-    # 5. 更新章节内容
+    # 5. 提取图表并更新内容
+    from apps.api.tasks.blueprint_tasks import _extract_diagrams_from_raw
+    diagrams = _extract_diagrams_from_raw(content)
+    normalized = _normalize_chapter_content(content.strip())
     repo = BlueprintRepository(db)
-    await repo.update_chapter_content(chapter_id, _normalize_chapter_content(content.strip()))
+    await repo.update_chapter_content(chapter_id, normalized)
     await db.execute(
         text("""UPDATE skill_chapters SET refined_at=now(),
                refinement_version = COALESCE(refinement_version, 0) + 1,
@@ -1451,6 +1574,43 @@ async def refine_chapter(
                WHERE chapter_id=CAST(:cid AS uuid)"""),
         {"cid": chapter_id}
     )
+
+    # 5.5. 图表渲染管道（精调后重新生成图表）
+    if diagrams:
+        try:
+            from apps.api.core.media_gateway import get_media_gateway
+            mgw = get_media_gateway()
+            await db.execute(
+                text("DELETE FROM media_assets WHERE chapter_id=CAST(:cid AS uuid)"),
+                {"cid": chapter_id}
+            )
+            for di, d in enumerate(diagrams):
+                result = await mgw.render_diagram(
+                    chapter_id, d["code"], d.get("type", "mermaid")
+                )
+                if result:
+                    await db.execute(
+                        text("""
+                            INSERT INTO media_assets
+                                (chapter_id, diagram_spec, storage_key,
+                                 content_type, provider_kind, sort_order)
+                            VALUES
+                                (CAST(:cid AS uuid), :spec, :key,
+                                 :ctype, :pkind, :sort)
+                        """),
+                        {
+                            "cid": chapter_id,
+                            "spec": d["code"],
+                            "key": result.storage_key,
+                            "ctype": result.content_type,
+                            "pkind": result.provider_kind,
+                            "sort": di,
+                        }
+                    )
+        except Exception as e:
+            logger.warning("Diagram rendering failed in refine",
+                          chapter_id=chapter_id, error=str(e))
+
     await db.commit()
 
     # 6. Layer 3: 测验缓存失效

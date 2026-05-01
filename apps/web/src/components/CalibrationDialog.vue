@@ -193,7 +193,7 @@ watch(() => props.visible, (newVal) => {
           }
         }
       }).catch((e: any) => {
-        // silently handle
+        console.error('Failed to load calibration questions:', e)
         questions.value = []
       }).finally(() => {
         loading.value = false
@@ -245,7 +245,7 @@ async function submitCalibration() {
       answers: payload,
     })
   } catch (e: any) {
-    // Error handled by composable's ElMessage
+    console.error('Failed to submit calibration:', e)
   } finally {
     submitting.value = false
   }

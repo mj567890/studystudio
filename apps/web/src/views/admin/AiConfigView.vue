@@ -144,7 +144,7 @@ const testDlgVisible = ref(false)
 const testDlgTarget = ref<Provider | null>(null)
 const testForm = reactive({
   model_name: 'deepseek-chat',
-  capability_kind: 'chat' as 'chat' | 'embedding' | 'reranker',
+  capability_kind: 'chat' as 'chat' | 'embedding' | 'reranker' | 'diagram_generation' | 'image_generation',
 })
 const testResult = ref<any>(null)
 const testing = ref(false)
@@ -317,7 +317,7 @@ const groupLabel: Record<string, string> = {
   vector: '向量类',
   vision: '视觉（未来）',
   audio: '语音（未来）',
-  image: '图像生成（未来）',
+  image: '图像生成',
   safety: '内容安全（未来）',
 }
 </script>
@@ -442,11 +442,13 @@ const groupLabel: Record<string, string> = {
         <el-form-item label="名称">
           <el-input v-model="providerForm.name" placeholder="DeepSeek-Main / SiliconFlow-Embed" />
         </el-form-item>
-        <el-form-item label="协议">
+        <el-form-item label="类型">
           <el-select v-model="providerForm.kind" style="width: 100%">
             <el-option label="OpenAI 兼容" value="openai_compatible" />
             <el-option label="Azure OpenAI" value="azure_openai" />
             <el-option label="Ollama" value="ollama" />
+            <el-option label="图片 API（DALL-E等）" value="image_api" />
+            <el-option label="图片本地（Kroki/ComfyUI）" value="image_local" />
             <el-option label="Anthropic（占位）" value="anthropic" />
             <el-option label="Gemini（占位）" value="gemini" />
           </el-select>
@@ -481,11 +483,13 @@ const groupLabel: Record<string, string> = {
             <el-radio value="chat">chat（测 /v1/chat/completions）</el-radio>
             <el-radio value="embedding">embedding（测 /v1/embeddings）</el-radio>
             <el-radio value="reranker">reranker（测 reranking 端点）</el-radio>
+            <el-radio value="diagram_generation">图表生成（测 /health）</el-radio>
+            <el-radio value="image_generation">图片生成（测连通性）</el-radio>
           </el-radio-group>
         </el-form-item>
         <el-form-item label="Model Name">
           <el-input v-model="testForm.model_name"
-                    :placeholder="testForm.capability_kind === 'chat' ? 'deepseek-chat' : testForm.capability_kind === 'embedding' ? 'BAAI/bge-m3' : 'bge-reranker-v2-m3'" />
+                    :placeholder="testForm.capability_kind === 'chat' ? 'deepseek-chat' : testForm.capability_kind === 'embedding' ? 'BAAI/bge-m3' : testForm.capability_kind === 'reranker' ? 'bge-reranker-v2-m3' : testForm.capability_kind === 'diagram_generation' ? 'mermaid（Kroki 格式）' : 'dall-e-3'" />
         </el-form-item>
       </el-form>
       <div v-if="testResult" class="test-result">
@@ -504,6 +508,9 @@ const groupLabel: Record<string, string> = {
             最高相关性得分：<strong>{{ testResult.top_score }}</strong>
             （测试了 {{ testResult.doc_count }} 篇候选文档）
             <div style="margin-top: 4px; font-size: 12px; color: #909399;">{{ testResult.sample }}</div>
+          </div>
+          <div v-if="testResult.capability_kind === 'diagram_generation' || testResult.capability_kind === 'image_generation'">
+            连通性：<code>{{ testResult.sample }}</code>
           </div>
         </el-alert>
         <el-alert v-else type="error" :closable="false">

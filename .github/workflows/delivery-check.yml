@@ -1,0 +1,79 @@
+name: Delivery Check
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  delivery-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect project
+        run: |
+          echo "Detecting project type..."
+          ls -la
+
+      - name: Setup Node.js
+        if: hashFiles('package.json') != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Node dependencies
+        if: hashFiles('package-lock.json') != ''
+        run: npm ci
+
+      - name: Install Node dependencies without lockfile
+        if: hashFiles('package.json') != '' && hashFiles('package-lock.json') == ''
+        run: npm install
+
+      - name: Node lint
+        if: hashFiles('package.json') != ''
+        run: npm run lint --if-present
+
+      - name: Node typecheck
+        if: hashFiles('package.json') != ''
+        run: npm run typecheck --if-present
+
+      - name: Node test
+        if: hashFiles('package.json') != ''
+        run: npm test --if-present
+
+      - name: Node build
+        if: hashFiles('package.json') != ''
+        run: npm run build --if-present
+
+      - name: Setup Python
+        if: hashFiles('requirements.txt', 'pyproject.toml', 'setup.py') != ''
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        if: hashFiles('requirements.txt') != ''
+        run: pip install -r requirements.txt
+
+      - name: Install Python project
+        if: hashFiles('pyproject.toml', 'setup.py') != ''
+        run: pip install -e . || true
+
+      - name: Python tests
+        if: hashFiles('requirements.txt', 'pyproject.toml', 'setup.py') != ''
+        run: |
+          if command -v pytest >/dev/null 2>&1; then pytest; else python -m unittest discover; fi
+
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Dependency review
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@v4

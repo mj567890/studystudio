@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS ai_providers (
     created_at        timestamptz  NOT NULL DEFAULT now(),
     updated_at        timestamptz  NOT NULL DEFAULT now(),
     CONSTRAINT ai_providers_kind_check CHECK (kind IN
-        ('openai_compatible','anthropic','gemini','ollama','azure_openai'))
+        ('openai_compatible','anthropic','gemini','ollama','azure_openai','image_api','image_local'))
 );
 
 COMMENT ON TABLE  ai_providers IS 'AI 服务提供方连接配置。api_key 用 Fernet 加密存储。';
