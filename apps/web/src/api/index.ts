@@ -82,6 +82,66 @@ export const authApi = {
 }
 
 // ── Learner ───────────────────────────────────────────────────
+export interface CourseProposal {
+  id: string
+  tagline: string
+  target_audience: { label: string; level: string; why_this_audience: string }
+  teaching_style: { label: string; approach: string; theory_practice_ratio: string }
+  course_structure: { total_chapters: number; estimated_hours: number; stage_breakdown: string; pacing: string }
+  key_differentiator: string
+}
+
+export interface GenerationAdjustments {
+  total_hours?: number
+  difficulty?: string
+  theory_ratio?: number
+}
+
+// ══════════════════════════════════════════
+// v2.2 新增：经验校准 + Course Map 类型
+// ══════════════════════════════════════════
+
+export interface CalibrationOption {
+  id: string
+  label: string
+  entity_id?: string
+}
+
+export interface CalibrationQuestion {
+  id: string
+  type: 'multi_select' | 'single_select' | 'ranking'
+  title: string
+  options: CalibrationOption[]
+  why_ask: string
+  skip_option: string
+  let_me_say?: boolean
+}
+
+export interface CourseMapChapter {
+  order: number
+  title: string
+  chapter_type: 'theory' | 'task' | 'compliance'
+  bloom_level: string
+  learning_objectives: Array<{ verb: string; object: string; bloom_level: string }>
+  estimated_minutes: number
+  calibration_routing: {
+    pain_points: Array<{ label: string; entity_id?: string }>
+    cases: Array<{ case_id: string; facet: string; usage: string }>
+    misconceptions: Array<{ label: string }>
+    red_lines: Array<{ label: string }>
+  }
+}
+
+export interface CourseMapData {
+  course_title: string
+  overall_narrative: string
+  bloom_progression: { early: string; late: string }
+  chapters: CourseMapChapter[]
+  coverage_check: { total_entities: number; covered_entities: number; coverage_rate: number }
+  bloom_distribution: Record<string, string>
+  calibration_coverage: { total_items: number; routed_items: number; missing: string[] }
+}
+
 export const blueprintApi = {
   getStatus: (topic: string) =>
     http.get(`/blueprints/${topic}/status`),
@@ -91,6 +151,34 @@ export const blueprintApi = {
       teacher_instruction: teacherInstruction || undefined,
       type_instructions: typeInstructions || undefined,
     }),
+  getProposals: (topic: string) =>
+    http.post(`/blueprints/${topic}/proposals`),
+  startGeneration: (topic: string, data: {
+    space_id: string
+    selected_proposal_id: string
+    adjustments?: GenerationAdjustments
+    extra_notes?: string
+    calibration_answers?: Record<string, any>  // ★v2.2
+    course_map_confirmed?: boolean            // ★v2.2
+  }) =>
+    http.post(`/blueprints/${topic}/start-generation`, data),
+
+  // ★v2.2 新增端点
+  getCalibrationQuestions: (topic: string, data: {
+    space_id: string
+    selected_proposal_id: string
+    adjustments?: GenerationAdjustments
+  }) =>
+    http.post(`/blueprints/${topic}/calibration-questions`, data),
+
+  getCourseMap: (topic: string, spaceId?: string) =>
+    http.get(`/blueprints/${topic}/course-map`, { params: spaceId ? { space_id: spaceId } : {} }),
+
+  regenerateCourseMap: (topic: string, data: {
+    reason: string
+    marked_chapters?: Record<string, any>
+  }) =>
+    http.post(`/blueprints/${topic}/course-map/regenerate`, data),
 }
 
 // ── Course Templates ──────────────────────────────────────────────
@@ -177,6 +265,8 @@ export const teachingApi = {
     http.get('/teaching/spaces'),
   getChapterSource: (chapterId: string) =>
     http.get(`/teaching/chapters/${chapterId}/source`),
+  getChapterDiagrams: (chapterId: string) =>
+    http.get(`/teaching/chapters/${chapterId}/diagrams`),
   listConversations: (spaceId?: string) =>
     http.get('/teaching/conversations', { params: spaceId ? { space_id: spaceId } : {} }),
   deleteConversation: (conversationId: string) =>
@@ -235,6 +325,8 @@ export const adminApi = {
   reparseDocument: (documentId: string) => http.post(`/files/reparse/${documentId}`),
   refineChapter: (chapterId: string, data: { instruction: string; auto_regenerate_quiz?: boolean; auto_regenerate_discussion?: boolean }) =>
     http.post(`/admin/courses/chapters/${chapterId}/refine`, data),
+  regenerateChapter: (chapterId: string, data?: { teacher_instruction?: string }) =>
+    http.post(`/admin/courses/chapters/${chapterId}/regenerate`, data || {}),
   rollbackChapter: (chapterId: string) =>
     http.post(`/admin/courses/chapters/${chapterId}/rollback`),
   getChapterDetail: (chapterId: string) =>
